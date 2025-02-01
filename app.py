@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Autor: <Vaše meno>
+Autor: <Mykyta Olym>
 Dátum: 2025
 Popis:
 Rozšírená demonštračná aplikácia v Streamlit, ktorá ilustruje:
@@ -23,17 +23,14 @@ Poznámka:
 import time
 import numpy as np
 import pandas as pd
-import streamlit as st
 
 # Pre interaktívne grafy s Plotly
 import plotly.express as px
 import plotly.io as pio
 import plotly.tools as tls  # pre konverziu matplotlib -> Plotly
+import streamlit as st
 
 pio.templates.default = "plotly_white"
-
-import seaborn as sns
-import matplotlib.pyplot as plt
 
 # LIME pre interpretáciu modelov
 from lime.lime_tabular import LimeTabularExplainer
@@ -75,10 +72,10 @@ except ImportError:
 #############################################
 # DATA FILE
 #############################################
-DATA_FILE = "./Data/dataset_developers_metrics.csv"
+DATA_FILE = "C:/Users/nikit/PycharmProjects/Bk/Data/dataset_developers_metrics.csv"
 
 #############################################
-# KONFIGURAČNÉ PARAMETRE (lze upravovať v samostatnom súbore)
+# KONFIGURAČNÉ PARAMETRE
 #############################################
 # Konfigurácia pre klastrovanie – nastavenia jednotlivých algoritmov
 clustering_config = {
@@ -113,7 +110,7 @@ feature_weights = {
     "CNII": 1.5,
     "AddLOC": 1.2,
     "DelLOC": 1.2,
-    # Pridajte ďalšie váhy podľa dôležitosti metrik
+    # Pridajte ďalšie váhy podľa potreby...
 }
 
 
@@ -123,20 +120,38 @@ feature_weights = {
 class FeatureWeighter(BaseEstimator, TransformerMixin):
     """
     Transformer, ktorý násobí vybrané príznaky danými váhami.
+
+    Parametre:
+        weights (dict): Slovník, kde kľúč predstavuje názov stĺpca a hodnota je váha (float),
+                        ktorou sa príslušný stĺpec vynásobí. Ak nie je zadaný, transformér
+                        neaplikuje žiadne váhovanie.
     """
 
     def __init__(self, weights=None):
         self.weights = weights if weights is not None else {}
 
-    def fit(self, X, y=None):
+    def fit(self, X):
+        # Overí, že X je pandas DataFrame a že hodnoty váh sú číselné.
+        if not isinstance(X, pd.DataFrame):
+            raise ValueError("Vstupné dáta musia byť typu pandas DataFrame.")
+        for col, weight in self.weights.items():
+            if col in X.columns:
+                try:
+                    float(weight)
+                except ValueError:
+                    raise ValueError(f"Hodnota váhy pre stĺpec '{col}' musí byť číselná, zistené: {weight}")
         return self
 
     def transform(self, X):
-        X = X.copy()
+        # Transformuje DataFrame tak, že každý stĺpec uvedený v self.weights je vynásobený príslušnou váhou.
+        if not isinstance(X, pd.DataFrame):
+            raise ValueError("Vstupné dáta musia byť typu pandas DataFrame.")
+        X_transformed = X.copy()
         for col, weight in self.weights.items():
-            if col in X.columns:
-                X[col] = X[col] * weight
-        return X
+            if col in X_transformed.columns:
+                # Konvertujeme stĺpec na float, aby sme sa vyhli problémom s typmi
+                X_transformed[col] = X_transformed[col].astype(float) * weight
+        return X_transformed
 
 
 #############################################
@@ -158,16 +173,16 @@ def load_data(path: str) -> pd.DataFrame:
 def prepare_data(df: pd.DataFrame):
     """
     Pripraví dáta pre analýzu:
-      - Pre numerické metriky: zahrnie len metriky definované v metrics_list, ak sú k dispozícii,
-        inak použije všetky numerické stĺpce. Imputácia chýbajúcich hodnôt mediánom.
+      - Pre numerické metriky: vyberie len metriky definované v metrics_list, ak sú k dispozícii,
+        inak použije všetky numerické stĺpce. Chýbajúce hodnoty imputuje mediánom.
       - Pre kategóriové stĺpce (napr. 'name' a 'project'): vykoná Label Encoding a pripojí
         projektové metriky (frekvencia výskytu projektu).
       - Dynamická mapácia cieľovej premennej 'job' pomocou job_mapping.
 
     Vracia:
-      - df_features: finálny DataFrame obsahujúci numerické aj zakódované kategórie.
-      - y_encoded: zakódované triedy (cieľová premenná) pre klasifikáciu.
-      - le: inštancia LabelEncoder pre 'job_class'.
+      - df_features: DataFrame obsahujúci numerické a zakódované kategórie.
+      - y_encoded: Zakódované triedy (cieľová premenná) pre klasifikáciu.
+      - le: Inštancia LabelEncoder pre 'job_class'.
     """
     metrics_list = ["followers", "NoC", "AB", "NAB", "CII", "CNII", "CE", "NCE",
                     "INEI", "IEI", "AddLGM", "DelLGM", "ChurnLGM", "NoMGM",
@@ -209,7 +224,6 @@ def prepare_data(df: pd.DataFrame):
 #############################################
 # STRÁNKY A FUNKCIE PRE ANALÝZU A VIZUALIZÁCIU
 #############################################
-
 def page_dataset_overview():
     """
     Stránka s celkovým prehľadom datasetu – zobrazuje ukážku dát, rozšírené štatistiky
@@ -500,7 +514,6 @@ def page_lime_interpretation():
     pipe.fit(X_train, y_train)
 
     # Pri použití LIME je dôležité zachovať DataFrame s názvami stĺpcov.
-    # Preto namiesto použitia .values použijeme pôvodný DataFrame.
     X_test_df = X_test.copy()
 
     st.write("Vyberte index vzorky pre vysvetlenie (0 - {}):".format(len(X_test_df) - 1))
@@ -510,12 +523,13 @@ def page_lime_interpretation():
 
     if len(X_test_df) > 0:
         instance = X_test_df.iloc[selected_idx:selected_idx + 1]  # zachováme DataFrame s názvami stĺpcov
-        exp = LimeTabularExplainer(
+        explainer = LimeTabularExplainer(
             training_data=X_train.values,
             training_labels=y_train,
             feature_names=X_train.columns.tolist(),
             discretize_continuous=True
-        ).explain_instance(
+        )
+        exp = explainer.explain_instance(
             data_row=instance.iloc[0].values,
             predict_fn=lambda x: pipe.predict_proba(pd.DataFrame(x, columns=X_train.columns)),
             num_features=num_features
@@ -546,7 +560,7 @@ def page_lime_interpretation():
                 transition_duration=500
             )
             st.plotly_chart(plotly_fig, use_container_width=True)
-        except Exception as e:
+        except (ValueError, TypeError):
             st.warning("Konverzia LIME grafu do Plotly sa nepodarila, zobrazujem matplotlib graf:")
             st.pyplot(fig_lime)
     else:
