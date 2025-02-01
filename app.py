@@ -73,9 +73,9 @@ except ImportError:
     FLAML_AVAILABLE = False
 
 #############################################
-# DATA FILE – Upravte cestu podľa potreby
+# DATA FILE
 #############################################
-DATA_FILE = "C:/Users/nikit/PycharmProjects/Bk/Data/dataset_developers_metrics.csv"
+DATA_FILE = "./Data/dataset_developers_metrics.csv"
 
 #############################################
 # KONFIGURAČNÉ PARAMETRE (lze upravovať v samostatnom súbore)
