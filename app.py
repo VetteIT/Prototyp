@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Autor: <Mykyta Olym>
+Autor: Mykyta Olym
 Dátum: 2025
 Popis:
 Rozšírená demonštračná aplikácia v Streamlit, ktorá ilustruje:
@@ -9,7 +9,7 @@ Rozšírená demonštračná aplikácia v Streamlit, ktorá ilustruje:
  - Pipeline (Feature weighting + StandardScaler + klaster)
  - RandomizedSearchCV s K-Fold cross-validation pre optimalizáciu RandomForest s rozšírenými hyperparametrami
  - Rozšírené metriky: Accuracy, Precision, Recall, F1, Balanced Accuracy, Cohen's Kappa,
-   Matthews Corrcoef, ROC AUC, Log Loss
+   Matthews Corrcoef, ROC AUC, Log Loss, F2 score, Brier Score, Average Precision Score
  - Interpretáciu modelu pomocou LIME (textový a interaktívny grafický výstup)
  - Interaktívne grafy s Plotly (PCA scatter plot, Confusion Matrix, barplot rozdelenia rolí, rating)
  - Kešovanie dát a výsledkov AutoML pre zrýchlenie
@@ -23,14 +23,17 @@ Poznámka:
 import time
 import numpy as np
 import pandas as pd
+import streamlit as st
 
 # Pre interaktívne grafy s Plotly
 import plotly.express as px
 import plotly.io as pio
 import plotly.tools as tls  # pre konverziu matplotlib -> Plotly
-import streamlit as st
 
 pio.templates.default = "plotly_white"
+
+import seaborn as sns
+import matplotlib.pyplot as plt
 
 # LIME pre interpretáciu modelov
 from lime.lime_tabular import LimeTabularExplainer
@@ -48,6 +51,9 @@ from sklearn.metrics import (
     precision_score,
     recall_score,
     f1_score,
+    fbeta_score,
+    brier_score_loss,
+    average_precision_score,
     confusion_matrix,
     classification_report,
     cohen_kappa_score,
@@ -57,8 +63,9 @@ from sklearn.metrics import (
     log_loss
 )
 from sklearn.model_selection import train_test_split, KFold, cross_val_score, RandomizedSearchCV
-from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.preprocessing import StandardScaler, LabelEncoder, label_binarize
 from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import FunctionTransformer
 
 # FLAML (AutoML)
 try:
@@ -104,54 +111,51 @@ job_mapping = {
     # Pridajte ďalšie mapovania podľa potreby...
 }
 
-# Konfigurácia pre váhovanie príznakov – nastavte koeficienty pre dôležitejšie metriky
+# Konfigurácia pre váhovanie príznakov – nastavte váhy pre všetky numerické metriky
 feature_weights = {
+    "followers": 1.0,
+    "NoC": 1.0,
+    "AB": 1.0,
+    "NAB": 1.0,
     "CII": 1.5,
     "CNII": 1.5,
+    "CE": 1.0,
+    "NCE": 1.0,
+    "INEI": 1.0,
+    "IEI": 1.0,
+    "AddLGM": 1.0,
+    "DelLGM": 1.0,
+    "ChurnLGM": 1.0,
+    "NoMGM": 1.0,
     "AddLOC": 1.2,
     "DelLOC": 1.2,
-    # Pridajte ďalšie váhy podľa potreby...
+    "churnLOC": 1.0,
+    "AddF": 1.0,
+    "DelF": 1.0,
+    "AddSAM": 1.0,
+    "DelSAM": 1.0,
+    "ChurnSAM": 1.0,
+    "DiP": 1.0,
+    "ICT": 1.0
 }
 
 
 #############################################
-# CUSTOM TRANSFORMER PRE FEATURE WEIGHTING
+# NOVÝ CUSTOM TRANSFORMER PRE FEATURE WEIGHTING
 #############################################
-class FeatureWeighter(BaseEstimator, TransformerMixin):
+def apply_feature_weights(X, weights):
     """
-    Transformer, ktorý násobí vybrané príznaky danými váhami.
-
-    Parametre:
-        weights (dict): Slovník, kde kľúč predstavuje názov stĺpca a hodnota je váha (float),
-                        ktorou sa príslušný stĺpec vynásobí. Ak nie je zadaný, transformér
-                        neaplikuje žiadne váhovanie.
+    Funkcia, ktorá pre každý stĺpec uvedený v 'weights' vynásobí hodnoty danou váhou.
     """
+    X_weighted = X.copy()
+    for col, weight in weights.items():
+        if col in X_weighted.columns:
+            X_weighted[col] = X_weighted[col].astype(float) * weight
+    return X_weighted
 
-    def __init__(self, weights=None):
-        self.weights = weights if weights is not None else {}
 
-    def fit(self, X):
-        # Overí, že X je pandas DataFrame a že hodnoty váh sú číselné.
-        if not isinstance(X, pd.DataFrame):
-            raise ValueError("Vstupné dáta musia byť typu pandas DataFrame.")
-        for col, weight in self.weights.items():
-            if col in X.columns:
-                try:
-                    float(weight)
-                except ValueError:
-                    raise ValueError(f"Hodnota váhy pre stĺpec '{col}' musí byť číselná, zistené: {weight}")
-        return self
-
-    def transform(self, X):
-        # Transformuje DataFrame tak, že každý stĺpec uvedený v self.weights je vynásobený príslušnou váhou.
-        if not isinstance(X, pd.DataFrame):
-            raise ValueError("Vstupné dáta musia byť typu pandas DataFrame.")
-        X_transformed = X.copy()
-        for col, weight in self.weights.items():
-            if col in X_transformed.columns:
-                # Konvertujeme stĺpec na float, aby sme sa vyhli problémom s typmi
-                X_transformed[col] = X_transformed[col].astype(float) * weight
-        return X_transformed
+# Vytvoríme transformer pomocou FunctionTransformer
+feature_weighting_transformer = FunctionTransformer(lambda X: apply_feature_weights(X, feature_weights), validate=False)
 
 
 #############################################
@@ -161,7 +165,7 @@ class FeatureWeighter(BaseEstimator, TransformerMixin):
 def load_data(path: str) -> pd.DataFrame:
     """
     Načíta dataset zo zadaného súboru a vráti pandas DataFrame.
-    Pre konverziu stĺpcov s objektmi sa aplikuje astype(str) pre kompatibilitu s Arrow.
+    Pre kompatibilitu s Arrow prevedie stĺpce typu object na string.
     """
     df = pd.read_csv(path)
     for col in df.select_dtypes(include=["object"]).columns:
@@ -173,16 +177,11 @@ def load_data(path: str) -> pd.DataFrame:
 def prepare_data(df: pd.DataFrame):
     """
     Pripraví dáta pre analýzu:
-      - Pre numerické metriky: vyberie len metriky definované v metrics_list, ak sú k dispozícii,
-        inak použije všetky numerické stĺpce. Chýbajúce hodnoty imputuje mediánom.
-      - Pre kategóriové stĺpce (napr. 'name' a 'project'): vykoná Label Encoding a pripojí
+      - Vyberie len metriky definované v metrics_list, alebo všetky numerické stĺpce.
+      - Imputuje chýbajúce hodnoty mediánom.
+      - Pre kategóriové stĺpce (napr. 'name' a 'project') vykoná Label Encoding a pripojí
         projektové metriky (frekvencia výskytu projektu).
-      - Dynamická mapácia cieľovej premennej 'job' pomocou job_mapping.
-
-    Vracia:
-      - df_features: DataFrame obsahujúci numerické a zakódované kategórie.
-      - y_encoded: Zakódované triedy (cieľová premenná) pre klasifikáciu.
-      - le: Inštancia LabelEncoder pre 'job_class'.
+      - Dynamicky mapuje cieľovú premennú 'job' pomocou job_mapping.
     """
     metrics_list = ["followers", "NoC", "AB", "NAB", "CII", "CNII", "CE", "NCE",
                     "INEI", "IEI", "AddLGM", "DelLGM", "ChurnLGM", "NoMGM",
@@ -225,13 +224,8 @@ def prepare_data(df: pd.DataFrame):
 # STRÁNKY A FUNKCIE PRE ANALÝZU A VIZUALIZÁCIU
 #############################################
 def page_dataset_overview():
-    """
-    Stránka s celkovým prehľadom datasetu – zobrazuje ukážku dát, rozšírené štatistiky
-    pre číselné stĺpce, informácie o stĺpcoch a barplot rozdelenia rolí.
-    """
     st.header("Celkový prehľad datasetu")
     df = load_data(DATA_FILE)
-
     tab1, tab2, tab3 = st.tabs(["Ukážka dát", "Rozšírené štatistiky", "Informácie o stĺpcoch"])
     with tab1:
         st.subheader("Ukážka dát")
@@ -247,8 +241,7 @@ def page_dataset_overview():
         st.dataframe(desc)
         if st.checkbox("Zobraziť korelačnú maticu"):
             corr = numeric_df.corr()
-            fig_corr = px.imshow(corr, text_auto=True, color_continuous_scale="RdBu_r",
-                                 title="Korelačná matica")
+            fig_corr = px.imshow(corr, text_auto=True, color_continuous_scale="RdBu_r", title="Korelačná matica")
             st.plotly_chart(fig_corr, use_container_width=True)
     with tab3:
         st.subheader("Informácie o stĺpcoch")
@@ -258,33 +251,24 @@ def page_dataset_overview():
             "Unikátne hodnoty": df.nunique()
         })
         st.table(col_info.astype(str))
-
     if "job_class" in df.columns:
         st.subheader("Rozdelenie rolí")
         job_counts = df["job_class"].value_counts().reset_index()
         job_counts.columns = ["job_class", "count"]
         fig_bar = px.bar(job_counts, x="job_class", y="count",
                          title="Rozdelenie vývojárov podľa úrovne",
-                         color="job_class",
-                         text="count")
+                         color="job_class", text="count")
         fig_bar.update_layout(transition_duration=500)
         st.plotly_chart(fig_bar, use_container_width=True)
 
 
 def page_data_and_clustering():
-    """
-    Stránka pre klastrovanie dát pomocou rôznych algoritmov s interaktívnymi grafmi.
-    Automatický výber počtu klastrov pri použití KMeans.
-    """
     st.header("Klastrovanie")
     df = load_data(DATA_FILE)
     df_features, y_enc, le = prepare_data(df)
     if df_features is None:
         return
-
-    cluster_algo = st.selectbox("Vyberte algoritmus klastrovania:",
-                                ["KMeans", "DBSCAN", "AgglomerativeClustering"])
-
+    cluster_algo = st.selectbox("Vyberte algoritmus klastrovania:", ["KMeans", "DBSCAN", "AgglomerativeClustering"])
     if cluster_algo == "KMeans":
         auto_select = st.checkbox("Automatický výber počtu klastrov", value=True)
         if auto_select:
@@ -314,25 +298,18 @@ def page_data_and_clustering():
         n_clusters_val = st.slider("Počet klastrov (Agglomerative)", 2, 10, params["n_clusters"], 1)
         linkage_val = st.selectbox("Linkage", ["ward", "complete", "average", "single"], index=0)
         cluster_model = AgglomerativeClustering(n_clusters=n_clusters_val, linkage=linkage_val)
-
     pipeline_cluster = Pipeline([
         ("scaler", StandardScaler()),
         ("cluster", cluster_model)
     ])
     pipeline_cluster.fit(df_features)
     cluster_labels = pipeline_cluster.named_steps["cluster"].labels_
-
     unique, counts = np.unique(cluster_labels, return_counts=True)
     cluster_sizes = dict(zip(unique, counts))
     st.subheader("Veľkosť klastrov")
-    st.table(pd.DataFrame({
-        "Cluster": list(cluster_sizes.keys()),
-        "Veľkosť": list(cluster_sizes.values())
-    }))
-
+    st.table(pd.DataFrame({"Cluster": list(cluster_sizes.keys()), "Veľkosť": list(cluster_sizes.values())}))
     pca = PCA(n_components=2, random_state=42)
     coords = pca.fit_transform(df_features)
-
     if len(np.unique(cluster_labels)) < 2:
         st.warning("Nedostatočný počet klastrov pre výpočet metrik.")
         sil = calinski = davies = None
@@ -350,7 +327,6 @@ def page_data_and_clustering():
             sil = silhouette_score(df_features, cluster_labels)
             calinski = calinski_harabasz_score(df_features, cluster_labels)
             davies = davies_bouldin_score(df_features, cluster_labels)
-
     col1, col2, col3 = st.columns(3)
     if sil is not None:
         col1.metric("Silhouette Score", f"{sil:.4f}")
@@ -358,11 +334,9 @@ def page_data_and_clustering():
         col2.metric("Calinski-Harabasz", f"{calinski:.2f}")
     if davies is not None:
         col3.metric("Davies-Bouldin", f"{davies:.2f}")
-
     if cluster_algo == "KMeans":
         inertia = cluster_model.inertia_
         st.metric("Inercia (KMeans)", f"{inertia:.2f}")
-
     st.markdown("### Interaktívny PCA Scatter Plot")
     fig_data = pd.DataFrame({
         "PC1": coords[:, 0],
@@ -381,8 +355,11 @@ def page_data_and_clustering():
 def page_classification():
     """
     Stránka pre klasifikáciu s hyperparametrickým ladením a 5-Fold cross-validation.
-    Používa sa rozšírený pipeline s váhovaním príznakov.
-    Po vytrénovaní modelu sa vypočíta aj rating (score) pre každého vývojára.
+    Používa sa rozšírený pipeline s váhovaním príznakov (pomocou FunctionTransformer).
+    Okrem základných metrik sa zobrazia aj dodatočné metriky:
+      - F2 Score (beta=2)
+      - Brier Score (multiclass – vypočítaný ako MSE medzi one-hot zakódovanými pravými hodnotami a pravdepodobnosťami)
+      - Average Precision Score (AUPRC)
     """
     st.header("Klasifikácia + Hyperparametrické ladenie + CrossVal")
     df = load_data(DATA_FILE)
@@ -390,9 +367,9 @@ def page_classification():
     if df_features is None:
         return
 
-    # Vloženie váhovacieho transforméra do pipeline
+    # Pipeline s váhovaním príznakov, scalingom a RandomForest klasifikátorom
     pipeline_steps = [
-        ("feature_weighting", FeatureWeighter(weights=feature_weights)),
+        ("feature_weighting", feature_weighting_transformer),
         ("scaler", StandardScaler()),
         ("rf", RandomForestClassifier(random_state=42))
     ]
@@ -430,6 +407,22 @@ def page_classification():
     kappa = cohen_kappa_score(y_encoded, y_pred)
     mcc = matthews_corrcoef(y_encoded, y_pred)
 
+    # Dodatočné metriky
+    f2 = fbeta_score(y_encoded, y_pred, beta=2, average="macro", zero_division=0)
+    if hasattr(best_model, "predict_proba"):
+        y_proba = best_model.predict_proba(df_features)
+        # Pre Brier Score pre multi-class – použijeme MSE medzi one-hot zakódovanými pravými hodnotami a y_proba
+        if len(np.unique(y_encoded)) == 2:
+            brier = brier_score_loss(y_encoded, y_proba.max(axis=1))
+        else:
+            classes = np.arange(len(le.classes_))
+            y_true_bin = label_binarize(y_encoded, classes=classes)
+            brier = np.mean(np.sum((y_true_bin - y_proba) ** 2, axis=1))
+        avg_precision = average_precision_score(y_encoded, y_proba, average="macro")
+    else:
+        brier = None
+        avg_precision = None
+
     additional_metrics = {}
     if hasattr(best_model, "predict_proba"):
         try:
@@ -453,6 +446,11 @@ def page_classification():
     col5.metric("Balanced Accuracy", f"{bal_acc:.3f}")
     col6.metric("Cohen's Kappa", f"{kappa:.3f}")
     col7.metric("Matthews Corrcoef", f"{mcc:.3f}")
+    col8.metric("F2 Score", f"{f2:.3f}")
+    if brier is not None:
+        st.metric("Brier Score", f"{brier:.3f}")
+    if avg_precision is not None:
+        st.metric("Avg Precision Score", f"{avg_precision:.3f}")
     if additional_metrics:
         for metric_name, value in additional_metrics.items():
             st.metric(metric_name, f"{value:.3f}")
@@ -472,7 +470,6 @@ def page_classification():
                                 text="Rating")
             fig_rating.update_layout(transition_duration=500)
             st.plotly_chart(fig_rating, use_container_width=True)
-
     cm = confusion_matrix(y_encoded, y_pred)
     cm_df = pd.DataFrame(cm, index=le.classes_, columns=le.classes_)
     fig_cm = px.imshow(cm_df, text_auto=True, color_continuous_scale="Blues",
@@ -481,48 +478,31 @@ def page_classification():
                        title="Confusion Matrix")
     fig_cm.update_layout(transition_duration=500)
     st.plotly_chart(fig_cm, use_container_width=True)
-
     st.markdown("**Classification Report:**")
     cr = classification_report(y_encoded, y_pred, target_names=le.classes_, zero_division=0)
     st.text(cr)
 
 
 def page_lime_interpretation():
-    """
-    Stránka pre interpretáciu predikcií pomocou LIME s interaktívnou vizualizáciou.
-    Vylepšený layout: možnosť voľby počtu vysvetľovaných vlastností, formátovaný textový výstup
-    a pokročilý interaktívny graf s vlastným stylingom.
-    """
     st.header("Interpretácia predikcií s LIME")
-
-    # Načítanie a príprava dát
     df = load_data(DATA_FILE)
     df_features, y_encoded, le = prepare_data(df)
     if df_features is None:
         return
-
-    # Rozdelenie dát na trénovaciu a testovaciu množinu
     X_train, X_test, y_train, y_test = train_test_split(
         df_features, y_encoded, test_size=0.3, random_state=42, stratify=y_encoded
     )
-
-    # Vytvorenie pipeline s RandomForest modelom pre LIME interpretáciu
     pipe = Pipeline([
         ("scaler", StandardScaler()),
         ("rf", RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42))
     ])
     pipe.fit(X_train, y_train)
-
-    # Pri použití LIME je dôležité zachovať DataFrame s názvami stĺpcov.
-    X_test_df = X_test.copy()
-
+    X_test_df = X_test.copy()  # Zachováme názvy stĺpcov pre LIME
     st.write("Vyberte index vzorky pre vysvetlenie (0 - {}):".format(len(X_test_df) - 1))
     selected_idx = st.slider("Index vzorky", 0, len(X_test_df) - 1, 0)
-
     num_features = st.selectbox("Počet vlastností pre vysvetlenie", [3, 5, 6, 8, 10], index=2)
-
     if len(X_test_df) > 0:
-        instance = X_test_df.iloc[selected_idx:selected_idx + 1]  # zachováme DataFrame s názvami stĺpcov
+        instance = X_test_df.iloc[selected_idx:selected_idx + 1]
         explainer = LimeTabularExplainer(
             training_data=X_train.values,
             training_labels=y_train,
@@ -537,15 +517,12 @@ def page_lime_interpretation():
         pred_class = pipe.predict(instance)[0]
         pred_label = le.inverse_transform([pred_class])[0]
         true_label = le.inverse_transform([y_test[selected_idx]])[0]
-
         st.subheader(f"Vysvetlenie pre vzorku s indexom {selected_idx}")
         st.markdown(f"**Skutočná trieda:** `{true_label}`  \n**Predikovaná trieda:** `{pred_label}`")
-
         with st.expander("Zobraziť textové vysvetlenie LIME"):
             explanation_list = exp.as_list()
             explanation_md = "\n".join([f"- **{item[0]}**: {item[1]:.4f}" for item in explanation_list])
             st.markdown(explanation_md)
-
         st.markdown("**Interaktívny graf LIME:**")
         fig_lime = exp.as_pyplot_figure()
         try:
@@ -569,10 +546,6 @@ def page_lime_interpretation():
 
 @st.cache_resource(show_spinner=True)
 def train_flaml_automl(X, y, time_budget=60):
-    """
-    Trénuje FLAML AutoML model so zadaným time_budgetom.
-    Výsledný model je kešovaný pre zrýchlenie opakovaných výpočtov.
-    """
     automl = AutoML()
     settings = {
         "time_budget": time_budget,
@@ -586,37 +559,27 @@ def train_flaml_automl(X, y, time_budget=60):
 
 
 def page_automl():
-    """
-    Stránka pre FLAML AutoML s kešovaním výsledkov.
-    """
     st.header("AutoML (FLAML) s kešovaním")
     df = load_data(DATA_FILE)
     df_features, y_encoded, le = prepare_data(df)
     if df_features is None:
         return
-
     if not FLAML_AVAILABLE or AutoML is None:
         st.info("FLAML nie je dostupné. Skontrolujte inštaláciu balíka flaml[automl].")
         return
-
     st.write("Nastavte time_budget (sekundy) pre FLAML:")
     tb = st.slider("time_budget", 10, 300, 60, 10)
-
     st.write("Rozdeľujeme dáta 80% / 20%...")
     X_train, X_test, y_train, y_test = train_test_split(
         df_features, y_encoded, test_size=0.2, random_state=42, stratify=y_encoded
     )
-
     st.write("Spúšťame FLAML AutoML s kešovaním...")
     automl_model = train_flaml_automl(X_train, y_train, tb)
-
     y_pred = automl_model.predict(X_test)
     acc = accuracy_score(y_test, y_pred)
     st.success(f"[FLAML] Presnosť = {acc:.3f}")
-
     f1_ = f1_score(y_test, y_pred, average="macro", zero_division=0)
     st.metric("F1 (macro)", f"{f1_:.3f}")
-
     st.markdown("**AutoML výsledky sú cachované, aby sa znížila doba trénovania.**")
 
 
@@ -628,7 +591,6 @@ def main():
         page_title="Open-Source Devs: Klasifikácia & Klastrovanie",
         layout="wide"
     )
-
     st.markdown("""
     <style>
     body {
@@ -649,7 +611,6 @@ def main():
     }
     </style>
     """, unsafe_allow_html=True)
-
     with st.sidebar:
         st.title("Navigácia")
         st.markdown("""
@@ -668,7 +629,6 @@ def main():
             "Vyberte stránku:",
             ("Celkový prehľad datasetu", "Klastrovanie", "Klasifikácia", "Interpretácia (LIME)", "AutoML (FLAML)")
         )
-
     if page == "Celkový prehľad datasetu":
         page_dataset_overview()
     elif page == "Klastrovanie":
@@ -679,7 +639,6 @@ def main():
         page_lime_interpretation()
     else:
         page_automl()
-
     st.sidebar.markdown("---")
     st.sidebar.info(
         "Aplikácia bola vytvorená pre demonštráciu pokročilých metód analýzy datasetov o open-source vývojároch.")
