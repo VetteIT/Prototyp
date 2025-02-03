@@ -87,7 +87,7 @@ except ImportError:
 # DEFINÍCIE CESTY K DÁTAM
 #############################################
 # Upravte cestu k súboru s datasetom podľa potreby
-DATA_FILE = "C:/Users/nikit/PycharmProjects/Bk/Data/dataset_developers_metrics.csv"
+DATA_FILE = "./Data/dataset_developers_metrics.csv"
 
 #############################################
 # KONFIGURAČNÉ PARAMETRE PRE KLASTROVANIE A KLASIFIKÁCIU
