@@ -22,6 +22,7 @@ Pre beh tejto aplikácie je potrebné nainštalovať knižnice:
  - lime
  - flaml[automl]
  - umap-learn
+ - kaleido  # pre export grafov vo vektorovom formáte
 Spustenie aplikácie: streamlit run app.py
 """
 
@@ -33,7 +34,7 @@ import streamlit as st  # Framework pre rýchle vytváranie webových aplikáci�
 # Import pre interaktívne grafy pomocou Plotly
 import plotly.express as px
 import plotly.io as pio
-import plotly.tools as tls  # Pre konverziu matplotlib grafov na Plotly formát
+import io  # Modul pre prácu s binárnymi dátami
 
 # Nastavenie predvoleného šablónu pre grafy v Plotly
 pio.templates.default = "plotly_white"
@@ -71,6 +72,40 @@ try:
 except ImportError:
     AutoML = None
     FLAML_AVAILABLE = False
+
+
+#############################################
+# POMOCNÁ FUNKCIA PRE EXPORT GRAFIKY VO VEKTOROVOM FORMÁTE
+#############################################
+def download_vector_figure(fig, filename="figure.svg"):
+    """
+    Funkcia pre prevod Plotly grafu na SVG a jeho následné stiahnutie.
+
+    Vstup:
+      - fig: Plotly graf (figure)
+      - filename: názov súboru pre stiahnutie (predvolene "figure.svg")
+
+    Výstup:
+      - Tlačidlo pre stiahnutie vektorového súboru vo formáte SVG.
+
+    Poznámka:
+      Pre export do SVG je potrebné, aby bol nainštalovaný balík 'kaleido'.
+      Táto verzia zabezpečuje, že ak sú rozmery grafu explicitne definované v layout-e (width, height),
+      budú použité pri exporte, čím zostanú "originálne" rozmery grafu.
+    """
+    try:
+        width = fig.layout.width if hasattr(fig.layout, "width") else None
+        height = fig.layout.height if hasattr(fig.layout, "height") else None
+        svg_bytes = fig.to_image(format="svg", width=width, height=height)
+        st.download_button(
+            label="Stiahnuť vektorovú grafiku (SVG)",
+            data=svg_bytes,
+            file_name=filename,
+            mime="image/svg+xml"
+        )
+    except Exception as e:
+        st.error("Nepodarilo sa exportovať graf: " + str(e))
+
 
 #############################################
 # DEFINÍCIE CESTY K DÁTAM
@@ -280,6 +315,7 @@ def page_dataset_overview():
             corr = numeric_df.corr()
             fig_corr = px.imshow(corr, text_auto=True, color_continuous_scale="RdBu_r", title="Korelačná matica")
             st.plotly_chart(fig_corr, use_container_width=True)
+            download_vector_figure(fig_corr, filename="korelacna_matica.svg")
     with tab3:
         st.subheader("Informácie o stĺpcoch")
         col_info = pd.DataFrame({
@@ -299,6 +335,7 @@ def page_dataset_overview():
                          color="job_class", text="count")
         fig_bar.update_layout(transition_duration=500)
         st.plotly_chart(fig_bar, use_container_width=True)
+        download_vector_figure(fig_bar, filename="rozdelenie_rolí.svg")
 
 
 def page_umap_visualization():
@@ -342,6 +379,7 @@ def page_umap_visualization():
                      title="UMAP 2D Vizualizácia", hover_data=["UMAP1", "UMAP2"])
     fig.update_layout(transition_duration=500)
     st.plotly_chart(fig, use_container_width=True)
+    download_vector_figure(fig, filename="umap_scatter.svg")
 
 
 def page_classification():
@@ -477,6 +515,7 @@ def page_classification():
                                 text="Rating")
             fig_rating.update_layout(transition_duration=500)
             st.plotly_chart(fig_rating, use_container_width=True)
+            download_vector_figure(fig_rating, filename="rating_vyvojarov.svg")
 
     # Zobrazenie matice zámien (confusion matrix)
     cm = confusion_matrix(y_encoded, y_pred)
@@ -487,6 +526,7 @@ def page_classification():
                        title="Confusion Matrix")
     fig_cm.update_layout(transition_duration=500)
     st.plotly_chart(fig_cm, use_container_width=True)
+    download_vector_figure(fig_cm, filename="confusion_matrix.svg")
     st.markdown("**Classification Report:**")
     cr = classification_report(y_encoded, y_pred, target_names=le.classes_, zero_division=0)
     st.text(cr)
@@ -560,6 +600,7 @@ def page_lime_interpretation():
             color_continuous_scale="RdBu"
         )
         st.plotly_chart(fig_lime, use_container_width=True)
+        download_vector_figure(fig_lime, filename="lime_explanation.svg")
     else:
         st.warning("Testovacia množina je prázdna.")
 
