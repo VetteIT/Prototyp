@@ -7,3 +7,4 @@ matplotlib
 lime
 flaml[automl]
 scikit-learn
+umap-learn
