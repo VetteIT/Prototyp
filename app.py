@@ -6,8 +6,7 @@ Popis:
 Tento skript predstavuje rozšírenú demonštračnú aplikáciu v prostredí Streamlit.
 Obsahuje nasledujúce funkcie:
  - Načítanie a predspracovanie datasetu (vrátane imputácie a enkódovania)
- - Klastrovanie s viacerými algoritmami (KMeans, DBSCAN, AgglomerativeClustering) s možnosťou automatického výberu počtu klastrov
- - Vytvorenie pipeline, ktorá obsahuje váhovanie príznakov, štandardizáciu a klastrovanie
+ - Dimenzionálnu redukciu s UMAP na vizualizáciu dát v 2D priestore
  - Klasifikáciu pomocou RandomForest s hyperparametrickým ladením cez RandomizedSearchCV a 5-Fold cross-validáciou
  - Výpočet rozšírených metrík (accuracy, precision, recall, F1, Balanced Accuracy, Cohen's Kappa, Matthews Corrcoef, ROC AUC, Log Loss, F2 score, Brier Score, Average Precision Score)
  - Interpretáciu modelu pomocou LIME s textovým a interaktívnym grafickým výstupom
@@ -19,9 +18,10 @@ Pre beh tejto aplikácie je potrebné nainštalovať knižnice:
  - streamlit
  - numpy, pandas
  - scikit-learn
- - plotly, seaborn, matplotlib
+ - plotly
  - lime
  - flaml[automl]
+ - umap-learn
 Spustenie aplikácie: streamlit run app.py
 """
 
@@ -38,22 +38,12 @@ import plotly.tools as tls  # Pre konverziu matplotlib grafov na Plotly formát
 # Nastavenie predvoleného šablónu pre grafy v Plotly
 pio.templates.default = "plotly_white"
 
-# Knižnice pre vizualizáciu dát (seaborn a matplotlib)
-import seaborn as sns
-import matplotlib.pyplot as plt
-
 # Import LIME pre interpretáciu modelov
 from lime.lime_tabular import LimeTabularExplainer
 
 # Import základných tried a metód zo scikit-learn
-from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering
-from sklearn.decomposition import PCA
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import (
-    silhouette_score,  # Metrika pre ohodnotenie kvality klastrovania
-    calinski_harabasz_score,  # Ďalšia metrika pre klastrovanie
-    davies_bouldin_score,  # Metrika hodnotiaca kompaktnosť a separabilitu klastrov
     accuracy_score,  # Presnosť klasifikácie
     precision_score,  # Precision (presnosť) klasifikácie
     recall_score,  # Recall (citlivosť) klasifikácie
@@ -77,7 +67,6 @@ from sklearn.preprocessing import FunctionTransformer
 # Import FLAML (AutoML) – umožňuje automatické ladenie modelov
 try:
     from flaml import AutoML
-
     FLAML_AVAILABLE = True
 except ImportError:
     AutoML = None
@@ -90,15 +79,8 @@ except ImportError:
 DATA_FILE = "./Data/dataset_developers_metrics.csv"
 
 #############################################
-# KONFIGURAČNÉ PARAMETRE PRE KLASTROVANIE A KLASIFIKÁCIU
+# PARAMETRE PRE KLASIFIKÁCIU
 #############################################
-# Parametre pre klastrovanie – prednastavenia pre jednotlivé algoritmy
-clustering_config = {
-    "KMeans": {"n_clusters": 3, "n_init": 10},  # Predvolený počet klastrov pre KMeans
-    "AgglomerativeClustering": {"n_clusters": 3, "linkage": "ward"},  # Pre hierarchické klastrovanie
-    "DBSCAN": {"eps": 0.5, "min_samples": 5}  # Parametre pre DBSCAN algoritmus
-}
-
 # Parametre pre RandomForest klasifikátor, vrátane rôznych hodnôt pre hyperparametre
 classification_config = {
     "RandomForest": {
@@ -252,7 +234,6 @@ def prepare_data(df: pd.DataFrame):
     if "job" in df.columns:
         def dynamic_job_mapping(x):
             return job_mapping.get(str(x).upper(), "neznamy")
-
         df["job_class"] = df["job"].apply(dynamic_job_mapping)
     else:
         st.error("Chýba stĺpec 'job'.")
@@ -320,119 +301,47 @@ def page_dataset_overview():
         st.plotly_chart(fig_bar, use_container_width=True)
 
 
-def page_data_and_clustering():
+def page_umap_visualization():
     """
-    Stránka demonštrujúca klastrovanie dát pomocou vybraného algoritmu.
-    Používateľ si môže zvoliť algoritmus a upraviť jeho parametre.
-    Po klastrovaní sa zobrazia:
-      - Veľkosti jednotlivých klastrov
-      - Výpočet metrík ako Silhouette Score, Calinski-Harabasz a Davies-Bouldin
-      - Interaktívny PCA scatter plot s vyznačenými klastrami
+    Funkcia demonštruje využitie UMAP na redukciu dimenzionality dát na 2D priestor.
+    Používateľ si môže nastaviť parametre UMAP (počet susedov a minimálnu vzdialenosť)
+    a výsledná vizualizácia zobrazuje body v 2D priestore, zafarbené podľa kategórie 'job_class'.
     """
-    st.header("Klastrovanie")
+    st.header("Vylepšená UMAP 2D Vizualizácia")
     df = load_data(DATA_FILE)
-    df_features, y_enc, le = prepare_data(df)
+    df_features, y_encoded, le = prepare_data(df)
     if df_features is None:
         return
 
-    # Výber algoritmu klastrovania
-    cluster_algo = st.selectbox("Vyberte algoritmus klastrovania:", ["KMeans", "DBSCAN", "AgglomerativeClustering"])
+    st.write("Táto sekcia demonštruje využitie UMAP na redukciu dimenzionality dát na 2D priestor.")
 
-    # Podmienky a nastavenia pre konkrétny algoritmus
-    if cluster_algo == "KMeans":
-        # Možnosť automatického výberu optimálneho počtu klastrov na základe Silhouette skóre
-        auto_select = st.checkbox("Automatický výber počtu klastrov", value=True)
-        if auto_select:
-            best_silhouette = -1
-            best_n_clusters = 2
-            # Testovanie počtu klastrov od 2 do 10
-            for n in range(2, 11):
-                model = KMeans(n_clusters=n, random_state=42, n_init=clustering_config["KMeans"]["n_init"])
-                labels = model.fit_predict(df_features)
-                sil = silhouette_score(df_features, labels)
-                if sil > best_silhouette:
-                    best_silhouette = sil
-                    best_n_clusters = n
-            st.write(f"Automaticky vybraný počet klastrov: {best_n_clusters} (Silhouette: {best_silhouette:.4f})")
-            cluster_model = KMeans(n_clusters=best_n_clusters, random_state=42,
-                                   n_init=clustering_config["KMeans"]["n_init"])
-        else:
-            params = clustering_config["KMeans"]
-            n_clusters_val = st.slider("Počet klastrov", 2, 10, params["n_clusters"], 1)
-            cluster_model = KMeans(n_clusters=n_clusters_val, random_state=42, n_init=params["n_init"])
-    elif cluster_algo == "DBSCAN":
-        params = clustering_config["DBSCAN"]
-        eps_val = st.slider("eps (DBSCAN)", 0.1, 5.0, params["eps"], 0.1)
-        min_samples_val = st.slider("min_samples (DBSCAN)", 1, 20, params["min_samples"], 1)
-        cluster_model = DBSCAN(eps=eps_val, min_samples=min_samples_val)
-    else:  # AgglomerativeClustering
-        params = clustering_config["AgglomerativeClustering"]
-        n_clusters_val = st.slider("Počet klastrov (Agglomerative)", 2, 10, params["n_clusters"], 1)
-        linkage_val = st.selectbox("Linkage", ["ward", "complete", "average", "single"], index=0)
-        cluster_model = AgglomerativeClustering(n_clusters=n_clusters_val, linkage=linkage_val)
+    # Nastavenie parametrov UMAP
+    n_neighbors = st.slider("Počet susedov (n_neighbors)", min_value=2, max_value=50, value=15, step=1)
+    min_dist = st.slider("Minimálna vzdialenosť (min_dist)", min_value=0.0, max_value=1.0, value=0.1, step=0.05)
 
-    # Vytvorenie pipeline, ktorá najprv normalizuje dáta (StandardScaler) a potom aplikuje klastrovanie
-    pipeline_cluster = Pipeline([
-        ("scaler", StandardScaler()),
-        ("cluster", cluster_model)
-    ])
-    pipeline_cluster.fit(df_features)
-    # Získanie priradenia dát do klastrov
-    cluster_labels = pipeline_cluster.named_steps["cluster"].labels_
-    unique, counts = np.unique(cluster_labels, return_counts=True)
-    cluster_sizes = dict(zip(unique, counts))
-    st.subheader("Veľkosť klastrov")
-    st.table(pd.DataFrame({"Cluster": list(cluster_sizes.keys()), "Veľkosť": list(cluster_sizes.values())}))
+    # Import knižnice UMAP
+    try:
+        import umap
+    except ImportError:
+        st.error("Knižnica umap-learn nie je nainštalovaná. Nainštalujte ju príkazom 'pip install umap-learn'.")
+        return
 
-    # Použitie PCA na zníženie dimenzionality pre 2D vizualizáciu
-    pca = PCA(n_components=2, random_state=42)
-    coords = pca.fit_transform(df_features)
+    # Aplikácia UMAP na zníženie dimenzionality
+    reducer = umap.UMAP(n_neighbors=n_neighbors, min_dist=min_dist, n_components=2, random_state=42)
+    embedding = reducer.fit_transform(df_features)
 
-    # Výpočet metrík iba ak je vytvorených aspoň 2 klastre (okrem špeciálneho prípadu DBSCAN, kde môžu byť outliery označené ako -1)
-    if len(np.unique(cluster_labels)) < 2:
-        st.warning("Nedostatočný počet klastrov pre výpočet metrik.")
-        sil = calinski = davies = None
-    else:
-        if np.min(cluster_labels) < 0:
-            st.write("Poznámka: DBSCAN môže vrátiť -1 pre outliers.")
-            valid_mask = (cluster_labels != -1)
-            if valid_mask.sum() > 1 and len(np.unique(cluster_labels[valid_mask])) > 1:
-                sil = silhouette_score(df_features[valid_mask], cluster_labels[valid_mask])
-                calinski = calinski_harabasz_score(df_features[valid_mask], cluster_labels[valid_mask])
-                davies = davies_bouldin_score(df_features[valid_mask], cluster_labels[valid_mask])
-            else:
-                sil = calinski = davies = None
-        else:
-            sil = silhouette_score(df_features, cluster_labels)
-            calinski = calinski_harabasz_score(df_features, cluster_labels)
-            davies = davies_bouldin_score(df_features, cluster_labels)
-
-    # Zobrazenie metrík v troch stĺpcoch
-    col1, col2, col3 = st.columns(3)
-    if sil is not None:
-        col1.metric("Silhouette Score", f"{sil:.4f}")
-    if calinski is not None:
-        col2.metric("Calinski-Harabasz", f"{calinski:.2f}")
-    if davies is not None:
-        col3.metric("Davies-Bouldin", f"{davies:.2f}")
-    if cluster_algo == "KMeans":
-        inertia = cluster_model.inertia_
-        st.metric("Inercia (KMeans)", f"{inertia:.2f}")
-
-    # Vytvorenie interaktívneho scatter plotu pomocou PCA redukovaných dát
-    st.markdown("### Interaktívny PCA Scatter Plot")
-    fig_data = pd.DataFrame({
-        "PC1": coords[:, 0],
-        "PC2": coords[:, 1],
-        "Cluster": cluster_labels.astype(str)
+    # Príprava dát pre vizualizáciu – použitie zakódovanej cieľovej premennej pre farebné odlíšenie
+    job_classes = le.inverse_transform(y_encoded)
+    df_umap = pd.DataFrame({
+        "UMAP1": embedding[:, 0],
+        "UMAP2": embedding[:, 1],
+        "JobClass": job_classes
     })
-    fig_plotly = px.scatter(
-        fig_data, x="PC1", y="PC2", color="Cluster",
-        title=f"{cluster_algo} + PCA (2D)",
-        hover_data=["PC1", "PC2"]
-    )
-    fig_plotly.update_layout(transition_duration=500)
-    st.plotly_chart(fig_plotly, use_container_width=True)
+
+    fig = px.scatter(df_umap, x="UMAP1", y="UMAP2", color="JobClass",
+                     title="UMAP 2D Vizualizácia", hover_data=["UMAP1", "UMAP2"])
+    fig.update_layout(transition_duration=500)
+    st.plotly_chart(fig, use_container_width=True)
 
 
 def page_classification():
@@ -478,8 +387,13 @@ def page_classification():
     search = RandomizedSearchCV(pipe, param_dist, n_iter=5, cv=3, scoring="f1_macro", random_state=42)
     search.fit(df_features, y_encoded)
     training_time = time.time() - start_time
+    st.write("Čas ladenia: {:.2f} sekúnd".format(training_time))
     st.write("Najlepšie parametre:", search.best_params_)
-    st.write(f"Čas ladenia: {training_time:.2f} sekúnd")
+
+    # Zobrazenie podrobných výsledkov testovaných modelov
+    cv_results_df = pd.DataFrame(search.cv_results_)[["params", "mean_test_score", "std_test_score", "rank_test_score"]]
+    st.subheader("Výsledky testovaných modelov")
+    st.dataframe(cv_results_df)
 
     best_model = search.best_estimator_
     # Použitie 5-Fold cross-validácie pre vyhodnotenie modelu pomocou F1 (macro) skóre
@@ -518,7 +432,6 @@ def page_classification():
     if hasattr(best_model, "predict_proba"):
         try:
             y_proba = best_model.predict_proba(df_features)
-            # Výpočet ROC AUC pre viactriedny model (one-vs-rest)
             roc_auc = roc_auc_score(y_encoded, y_proba, multi_class="ovr", average="macro")
             additional_metrics["ROC AUC (macro)"] = roc_auc
             ll = log_loss(y_encoded, y_proba)
@@ -552,7 +465,6 @@ def page_classification():
     # Výpočet ratingu – využíva pravdepodobnosť pre kategóriu "prof"
     if hasattr(best_model, "predict_proba"):
         y_proba = best_model.predict_proba(df_features)
-        # Zistenie indexu kategórie "prof" v zakódovaných triedach
         prof_index = np.where(le.classes_ == "prof")[0]
         if len(prof_index) > 0:
             prof_index = prof_index[0]
@@ -590,39 +502,33 @@ def page_lime_interpretation():
       - Rozdelenie dát na trénovaciu a testovaciu množinu
       - Natrénovanie modelu (RandomForest) na trénovacích dátach
       - Použitie LIME na vysvetlenie predikcie pre vybranú vzorku
-      - Zobrazenie textového vysvetlenia aj interaktívneho grafu (konverzia matplotlib -> Plotly)
+      - Zobrazenie textového vysvetlenia aj interaktívneho grafu s prehľadným usporiadaním
     """
     st.header("Interpretácia predikcií s LIME")
     df = load_data(DATA_FILE)
     df_features, y_encoded, le = prepare_data(df)
     if df_features is None:
         return
-    # Rozdelenie dát na trénovaciu (70%) a testovaciu (30%) množinu so stratifikáciou podľa cieľovej premennej
     X_train, X_test, y_train, y_test = train_test_split(
         df_features, y_encoded, test_size=0.3, random_state=42, stratify=y_encoded
     )
-    # Vytvorenie pipeline obsahujúcej štandardizáciu a RandomForest model
     pipe = Pipeline([
         ("scaler", StandardScaler()),
         ("rf", RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42))
     ])
     pipe.fit(X_train, y_train)
-    # Získanie testovacej množiny s pôvodnými názvami stĺpcov pre LIME
     X_test_df = X_test.copy()
     st.write("Vyberte index vzorky pre vysvetlenie (0 - {}):".format(len(X_test_df) - 1))
     selected_idx = st.slider("Index vzorky", 0, len(X_test_df) - 1, 0)
     num_features = st.selectbox("Počet vlastností pre vysvetlenie", [3, 5, 6, 8, 10], index=2)
     if len(X_test_df) > 0:
-        # Výber konkrétnej vzorky
         instance = X_test_df.iloc[selected_idx:selected_idx + 1]
-        # Inicializácia LIME vysvetľovača s trénovacími dátami
         explainer = LimeTabularExplainer(
             training_data=X_train.values,
             training_labels=y_train,
             feature_names=X_train.columns.tolist(),
             discretize_continuous=True
         )
-        # Vygenerovanie vysvetlenia pre vybranú vzorku
         exp = explainer.explain_instance(
             data_row=instance.iloc[0].values,
             predict_fn=lambda x: pipe.predict_proba(pd.DataFrame(x, columns=X_train.columns)),
@@ -638,23 +544,22 @@ def page_lime_interpretation():
             explanation_md = "\n".join([f"- **{item[0]}**: {item[1]:.4f}" for item in explanation_list])
             st.markdown(explanation_md)
         st.markdown("**Interaktívny graf LIME:**")
-        fig_lime = exp.as_pyplot_figure()
-        try:
-            # Konverzia matplotlib grafu do Plotly formátu pre interaktívne zobrazenie
-            plotly_fig = tls.mpl_to_plotly(fig_lime)
-            plotly_fig.update_layout(
-                title="LIME Vizualizácia",
-                title_font=dict(size=20, color="#0078AE"),
-                xaxis_title="Vlastnosti",
-                yaxis_title="Dopad",
-                plot_bgcolor="rgba(0,0,0,0)",
-                paper_bgcolor="rgba(255,255,255,1)",
-                transition_duration=500
-            )
-            st.plotly_chart(plotly_fig, use_container_width=True)
-        except (ValueError, TypeError):
-            st.warning("Konverzia LIME grafu do Plotly sa nepodarila, zobrazujem matplotlib graf:")
-            st.pyplot(fig_lime)
+        # Vytvorenie prehľadného interaktívneho grafu s využitím Plotly
+        explanation_list = exp.as_list()
+        explanation_df = pd.DataFrame(explanation_list, columns=["Feature", "Contribution"])
+        # Zoradenie podľa príspevku pre lepšiu prehľadnosť (od najnižšieho po najvyšší)
+        explanation_df = explanation_df.sort_values(by="Contribution", ascending=True)
+        fig_lime = px.bar(
+            explanation_df,
+            x="Contribution",
+            y="Feature",
+            orientation='h',
+            title="LIME Explanation: Príspevky príznakov",
+            labels={"Contribution": "Príspevok k predikcii", "Feature": "Príznak"},
+            color="Contribution",
+            color_continuous_scale="RdBu"
+        )
+        st.plotly_chart(fig_lime, use_container_width=True)
     else:
         st.warning("Testovacia množina je prázdna.")
 
@@ -691,6 +596,7 @@ def page_automl():
     Dáta sa rozdelia na trénovaciu (80%) a testovaciu (20%) množinu.
     Výsledný model sa otestuje na testovacej množine a zobrazí sa presnosť a F1 skóre.
     Kešovanie znižuje dobu opakovaného trénovania.
+    Navyše, sú zobrazené detaily o vybranej modeli.
     """
     st.header("AutoML (FLAML) s kešovaním")
     df = load_data(DATA_FILE)
@@ -713,6 +619,11 @@ def page_automl():
     st.success(f"[FLAML] Presnosť = {acc:.3f}")
     f1_ = f1_score(y_test, y_pred, average="macro", zero_division=0)
     st.metric("F1 (macro)", f"{f1_:.3f}")
+
+    # Zobrazenie detailov o vybranej modeli FLAML
+    st.subheader("Vybraná modelová konfigurácia FLAML")
+    st.write("Best Estimator:", automl_model.best_estimator)
+    st.write("Best Config:", automl_model.best_config)
     st.markdown("**AutoML výsledky sú cachované, aby sa znížila doba trénovania.**")
 
 
@@ -726,13 +637,13 @@ def main():
 
     Sekcie obsahujú:
       - Celkový prehľad datasetu
-      - Klastrovanie dát
-      - Klasifikáciu s hyperparametrickým ladením a cross-validáciou
+      - Dimenzionálnu redukciu dát pomocou UMAP
+      - Klasifikáciu s hyperparametrickým ladením a 5-Fold CrossVal
       - Interpretáciu pomocou LIME
       - Automatické ladenie pomocou FLAML
     """
     st.set_page_config(
-        page_title="Open-Source Devs: Klasifikácia & Klastrovanie",
+        page_title="Open-Source Devs: Klasifikácia & Dimenzionálna redukcia",
         layout="wide"
     )
     st.markdown("""
@@ -761,7 +672,7 @@ def main():
         **O aplikácii:**
         - Načítanie a kešovanie datasetu
         - Detailný prehľad dát (vrátane rozdelenia rolí a ratingu)
-        - Rôzne algoritmy klastrovania s interaktívnymi grafmi
+        - Dimenzionálna redukcia dát pomocou UMAP (2D vizualizácia)
         - RandomForest s hyperparametrickým ladením a 5-Fold CrossVal
         - Interpretácia pomocou LIME s interaktívnym grafom
         - AutoML s FLAML (kešovanie výsledkov)
@@ -771,13 +682,13 @@ def main():
         """)
         page = st.radio(
             "Vyberte stránku:",
-            ("Celkový prehľad datasetu", "Klastrovanie", "Klasifikácia", "Interpretácia (LIME)", "AutoML (FLAML)")
+            ("Celkový prehľad datasetu", "Dimenzionálna redukcia (UMAP)", "Klasifikácia", "Interpretácia (LIME)",
+             "AutoML (FLAML)")
         )
-    # Volanie príslušnej funkcie na základe výberu v navigácii
     if page == "Celkový prehľad datasetu":
         page_dataset_overview()
-    elif page == "Klastrovanie":
-        page_data_and_clustering()
+    elif page == "Dimenzionálna redukcia (UMAP)":
+        page_umap_visualization()
     elif page == "Klasifikácia":
         page_classification()
     elif page == "Interpretácia (LIME)":
@@ -785,7 +696,6 @@ def main():
     else:
         page_automl()
 
-    # Doplňujúce informácie v sidebar
     st.sidebar.markdown("---")
     st.sidebar.info(
         "Aplikácia bola vytvorená pre demonštráciu pokročilých metód analýzy datasetov o open-source vývojároch."
