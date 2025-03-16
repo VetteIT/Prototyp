@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import time
 import warnings
-
+import asyncio
 
 # Import third-party libraries
 import numpy as np
@@ -61,9 +61,13 @@ except ImportError:
     FLAML_AVAILABLE = False
     AutoML = None
 
-st.set_option('server.fileWatcherType', 'none')
 # Suppress warnings for a cleaner output
 warnings.filterwarnings("ignore")
+
+try:
+    asyncio.get_running_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
 
 # Set a clean and modern Plotly theme
 pio.templates.default = "plotly_white"
