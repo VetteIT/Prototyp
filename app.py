@@ -61,6 +61,7 @@ except ImportError:
     FLAML_AVAILABLE = False
     AutoML = None
 
+st.set_option('server.fileWatcherType', 'none')
 # Suppress warnings for a cleaner output
 warnings.filterwarnings("ignore")
 
