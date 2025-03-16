@@ -2,10 +2,9 @@ streamlit
 numpy
 pandas
 plotly
-seaborn
-matplotlib
-lime
-flaml[automl]
+torch
 scikit-learn
 umap-learn
-kaleido
+lime
+flaml
+lightgbm
