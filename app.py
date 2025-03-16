@@ -128,7 +128,7 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 # GLOBAL SETTINGS & HYPERPARAMETERS
 ##############################################################################
 # Path to the dataset (Update if necessary)
-DATASET_PATH = r"Data\developer_metrics_final.parquet"
+DATASET_PATH = r"developer_metrics_final.parquet"
 
 # List of numeric and categorical features for processing
 NUMERIC_FEATURES = [
