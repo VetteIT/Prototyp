@@ -1,750 +1,1088 @@
 # -*- coding: utf-8 -*-
 """
-Autor: Mykyta Olym
-Dátum: 2025
-Popis:
-Tento skript predstavuje rozšírenú demonštračnú aplikáciu v prostredí Streamlit.
-Obsahuje nasledujúce funkcie:
- - Načítanie a predspracovanie datasetu (vrátane imputácie a enkódovania)
- - Dimenzionálnu redukciu s UMAP na vizualizáciu dát v 2D priestore
- - Klasifikáciu pomocou RandomForest s hyperparametrickým ladením cez RandomizedSearchCV a 5-Fold cross-validáciou
- - Výpočet rozšírených metrík (accuracy, precision, recall, F1, Balanced Accuracy, Cohen's Kappa, Matthews Corrcoef, ROC AUC, Log Loss, F2 score, Brier Score, Average Precision Score)
- - Interpretáciu modelu pomocou LIME s textovým a interaktívnym grafickým výstupom
- - Interaktívne vizualizácie pomocou Plotly (PCA scatter plot, Confusion Matrix, barplot rozdelenia rolí a rating)
- - Automatické ladenie modelu pomocou FLAML s kešovaním výsledkov pre zrýchlenie výpočtov
-
-Poznámka:
-Pre beh tejto aplikácie je potrebné nainštalovať knižnice:
- - streamlit
- - numpy, pandas
- - scikit-learn
- - plotly
- - lime
- - flaml[automl]
- - umap-learn
- - kaleido  # pre export grafov vo vektorovom formáte
-Spustenie aplikácie: streamlit run app.py
+Modern Developer Metrics & Professional Identification App
+Enhanced Streamlit Design with Improved Graphs & Dual Download Options (SVG/PDF)
+All text is now in English. No LLM integrations.
 """
 
-import time  # Modul pre meranie času
-import numpy as np  # Knižnica pre prácu s číselnými dátami
-import pandas as pd  # Knižnica pre prácu s dátovými rámcami (DataFrame)
-import streamlit as st  # Framework pre rýchle vytváranie webových aplikácií
+import os
+import subprocess
+import tempfile
+import time
+import warnings
 
-# Import pre interaktívne grafy pomocou Plotly
+
+# Import third-party libraries
+import numpy as np
+import pandas as pd
 import plotly.express as px
 import plotly.io as pio
-import io  # Modul pre prácu s binárnymi dátami
-
-# Nastavenie predvoleného šablónu pre grafy v Plotly
-pio.templates.default = "plotly_white"
-
-# Import LIME pre interpretáciu modelov
-from lime.lime_tabular import LimeTabularExplainer
-
-# Import základných tried a metód zo scikit-learn
+import streamlit as st
+import torch
+import torch.nn as nn
+import torch.optim as optim
+# scikit-learn modules for modeling and evaluation
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.feature_selection import RFE, SelectKBest, f_classif
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
-    accuracy_score,  # Presnosť klasifikácie
-    precision_score,  # Precision (presnosť) klasifikácie
-    recall_score,  # Recall (citlivosť) klasifikácie
-    f1_score,  # F1 skóre
-    fbeta_score,  # F-beta skóre (tu najmä F2)
-    brier_score_loss,  # Brier skóre pre odhad pravdepodobností
-    average_precision_score,  # Priemerná precision pre viactriednu klasifikáciu
-    confusion_matrix,  # Matica zámien (confusion matrix)
-    classification_report,  # Textové zhrnutie metrík klasifikácie
-    cohen_kappa_score,  # Cohen's Kappa pre hodnotenie zhody
-    matthews_corrcoef,  # Matthews correlation coefficient
-    balanced_accuracy_score,  # Vyvážená presnosť
-    roc_auc_score,  # ROC AUC pre viactriedne modely
-    log_loss  # Logaritmická strata
+    accuracy_score, precision_score, recall_score, f1_score,
+    roc_auc_score,
+    balanced_accuracy_score, cohen_kappa_score, matthews_corrcoef,
+    log_loss, fbeta_score, brier_score_loss, average_precision_score, make_scorer
 )
-from sklearn.model_selection import train_test_split, KFold, cross_val_score, RandomizedSearchCV
-from sklearn.preprocessing import StandardScaler, LabelEncoder, label_binarize
+from sklearn.model_selection import (
+    train_test_split, RandomizedSearchCV, StratifiedKFold, cross_validate
+)
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import FunctionTransformer
+from sklearn.preprocessing import StandardScaler
+import random
+np.random.seed(42)
+torch.manual_seed(42)
+random.seed(42)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
 
-# Import FLAML (AutoML) – umožňuje automatické ladenie modelov
+# Optional libraries
+try:
+    import umap
+except ImportError:
+    umap = None
+
+try:
+    from lime.lime_tabular import LimeTabularExplainer
+except ImportError:
+    LimeTabularExplainer = None
+
 try:
     from flaml import AutoML
     FLAML_AVAILABLE = True
 except ImportError:
-    AutoML = None
     FLAML_AVAILABLE = False
+    AutoML = None
 
+# Suppress warnings for a cleaner output
+warnings.filterwarnings("ignore")
 
-#############################################
-# POMOCNÁ FUNKCIA PRE EXPORT GRAFIKY VO VEKTOROVOM FORMÁTE
-#############################################
+# Set a clean and modern Plotly theme
+pio.templates.default = "plotly_white"
+
+##############################################################################
+# CUSTOM CSS & PAGE CONFIGURATION
+##############################################################################
+# Custom CSS to enhance the overall appearance of the app
+CUSTOM_CSS = """
+<style>
+/* Global styling for a modern interface */
+body {
+    background-color: #f5f5f5;
+    color: #333;
+    font-family: 'Helvetica Neue', Arial, sans-serif;
+}
+h1, h2, h3, h4, h5 {
+    color: #2c3e50;
+    margin-top: 0.75em;
+    margin-bottom: 0.5em;
+}
+table, .metrics-table {
+    margin-bottom: 1em;
+    border: 1px solid #ccc;
+    border-collapse: collapse;
+}
+table th, table td, .metrics-table th, .metrics-table td {
+    border: 1px solid #ccc;
+    padding: 0.5em;
+}
+/* Sidebar styling */
+.sidebar .sidebar-content {
+    background-color: #eaecef;
+    padding-top: 1rem !important;
+}
+/* Buttons */
+.stButton>button {
+    background-color: #3498db;
+    color: white;
+    border-radius: 5px;
+    font-size: 16px;
+    margin-bottom: 0.5em;
+    height: 2.5em;
+    width: 100%;
+    transition: background-color 0.3s ease;
+}
+.stButton>button:hover {
+    background-color: #2980b9;
+}
+/* Header styling */
+section[data-testid="stHeader"] {
+    border-bottom: 1px solid #ccc;
+    margin-bottom: 1em;
+}
+</style>
+"""
+
+# Set page configuration and include custom CSS
+st.set_page_config(page_title="Bakalarska", layout="wide")
+st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+
+##############################################################################
+# GLOBAL SETTINGS & HYPERPARAMETERS
+##############################################################################
+# Path to the dataset (Update if necessary)
+DATASET_PATH = r"C:\Users\nikit\PycharmProjects\Bk\DataCollecting\src\results\developer_metrics_final.parquet"
+
+# List of numeric and categorical features for processing
+NUMERIC_FEATURES = [
+    "followers", "days", "weeks", "period", "timediff", "timediff_std",
+    "commits", "weekend", "night", "morning", "afternoon", "evening",
+    "office", "most_active_hour", "beginning_regular", "end_regular",
+    "length_regular", "avg_message_len", "loc_per_commit",
+    "max_loc_in_one_commit", "loc_mean_per_commit", "avg_loc_per_day",
+    "total_repositories_fetched"
+]
+
+CATEGORICAL_FEATURES = ["username", "email", "skuseny", "neznamy"]
+
+# Hyperparameters for RandomForest and LightGBM models
+HYPERPARAM_CONFIG = {
+    "RandomForest": {
+        "n_estimators": [50, 100, 200, 300],
+        "max_depth": ["auto", 5, 10],
+        "min_samples_split": [2, 5],
+        "max_features": ["sqrt", "log2","auto"],
+        "bootstrap": [True, False]
+    },
+    "LightGBM": {
+        "n_estimators": [50, 100, 200],
+        "max_depth": [5, 10, -1],
+        "learning_rate": [0.01, 0.05, 0.1],
+        "num_leaves": [20, 31, 40],
+        "subsample": [0.8, 1.0],
+        "min_split_gain": [0.1, 0.2],
+        "min_data_in_leaf": [20, 30],
+        "min_sum_hessian_in_leaf": [1e-3, 0.01]
+    }
+}
+
+##############################################################################
+# GRAPH DOWNLOAD FUNCTIONS (SVG & PDF)
+##############################################################################
 def download_vector_figure(fig, filename="figure.svg"):
     """
-    Funkcia pre prevod Plotly grafu na SVG a jeho následné stiahnutie.
-
-    Vstup:
-      - fig: Plotly graf (figure)
-      - filename: názov súboru pre stiahnutie (predvolene "figure.svg")
-
-    Výstup:
-      - Tlačidlo pre stiahnutie vektorového súboru vo formáte SVG.
-
-    Poznámka:
-      Pre export do SVG je potrebné, aby bol nainštalovaný balík 'kaleido'.
-      Táto verzia zabezpečuje, že ak sú rozmery grafu explicitne definované v layout-e (width, height),
-      budú použité pri exporte, čím zostanú "originálne" rozmery grafu.
+    Converts a Plotly figure to SVG and provides a download button.
     """
     try:
-        width = fig.layout.width if hasattr(fig.layout, "width") else None
-        height = fig.layout.height if hasattr(fig.layout, "height") else None
-        svg_bytes = fig.to_image(format="svg", width=width, height=height)
+        svg_bytes = fig.to_image(format="svg")
         st.download_button(
-            label="Stiahnuť vektorovú grafiku (SVG)",
+            label="Download as SVG",
             data=svg_bytes,
             file_name=filename,
             mime="image/svg+xml"
         )
-    except Exception as e:
-        st.error("Nepodarilo sa exportovať graf: " + str(e))
+    except (ValueError, OSError) as e:
+        st.error(f"Cannot export to SVG: {e}")
 
 
-#############################################
-# DEFINÍCIE CESTY K DÁTAM
-#############################################
-# Upravte cestu k súboru s datasetom podľa potreby
-DATA_FILE = "./Data/dataset_developers_metrics.csv"
-
-#############################################
-# PARAMETRE PRE KLASIFIKÁCIU
-#############################################
-# Parametre pre RandomForest klasifikátor, vrátane rôznych hodnôt pre hyperparametre
-classification_config = {
-    "RandomForest": {
-        "n_estimators": [50, 100, 200],
-        "max_depth": [5, 10, 20],
-        "min_samples_split": [2, 5, 10],
-        "max_features": ["sqrt", "log2", None],
-        "bootstrap": [True, False],
-        "class_weight": ["balanced", None]
-    }
-}
-
-# Mapovanie hodnôt v stĺpci 'job' na kategórie (napr. "prof" pre profesionála, "skuseny" pre skúseného, atď.)
-job_mapping = {
-    "SE": "prof",
-    "SSE": "skuseny",
-    "SA": "skuseny",
-    # Tu môžete pridať ďalšie mapovania podľa potreby
-}
-
-# Definícia váh pre jednotlivé numerické metriky – ovplyvňuje dôležitosť príznakov v modeli
-feature_weights = {
-    "followers": 1.0,
-    "NoC": 1.0,
-    "AB": 1.0,
-    "NAB": 1.0,
-    "CII": 1.5,
-    "CNII": 1.5,
-    "CE": 1.0,
-    "NCE": 1.0,
-    "INEI": 1.0,
-    "IEI": 1.0,
-    "AddLGM": 1.0,
-    "DelLGM": 1.0,
-    "ChurnLGM": 1.0,
-    "NoMGM": 1.0,
-    "AddLOC": 1.2,
-    "DelLOC": 1.2,
-    "churnLOC": 1.0,
-    "AddF": 1.0,
-    "DelF": 1.0,
-    "AddSAM": 1.0,
-    "DelSAM": 1.0,
-    "ChurnSAM": 1.0,
-    "DiP": 1.0,
-    "ICT": 1.0
-}
-
-
-#############################################
-# FUNKCIA PRE VÁHOVANIE PRÍZNAKOV (CUSTOM TRANSFORMER)
-#############################################
-def apply_feature_weights(X, weights):
+def convert_svg_to_pdf(svg_bytes, pdf_filename="figure.pdf"):
     """
-    Funkcia aplikuje váhovanie na jednotlivé stĺpce dát.
-    Pre každý stĺpec, ktorý sa nachádza v zadanom slovníku 'weights',
-    vynásobí hodnoty príslušnou váhou.
-
-    Vstup:
-      - X: pandas DataFrame s dátami
-      - weights: slovník, kde kľúče sú názvy stĺpcov a hodnoty sú váhy
-
-    Výstup:
-      - X_weighted: DataFrame s aplikovanými váhami na príslušné stĺpce
+    Converts an SVG byte stream to PDF using Inkscape.
+    Inkscape must be installed locally for this to work.
     """
-    X_weighted = X.copy()
-    for col, weight in weights.items():
-        if col in X_weighted.columns:
-            X_weighted[col] = X_weighted[col].astype(float) * weight
-    return X_weighted
-
-
-# Vytvorenie transformeru pomocou FunctionTransformer, ktorý využije funkciu apply_feature_weights
-feature_weighting_transformer = FunctionTransformer(lambda X: apply_feature_weights(X, feature_weights), validate=False)
-
-
-#############################################
-# FUNKCIE PRE NAČÍTANIE A PRÍPRAVU DÁT
-#############################################
-@st.cache_data(show_spinner=True)
-def load_data(path: str) -> pd.DataFrame:
-    """
-    Načíta dáta zo súboru CSV, zabezpečí konverziu textových stĺpcov na reťazce
-    a vráti pandas DataFrame.
-
-    Použitie kešovania (cache) zrýchľuje opakované načítanie dát.
-
-    Vstup:
-      - path: cesta k súboru CSV
-
-    Výstup:
-      - df: načítaný DataFrame s dátami
-    """
-    df = pd.read_csv(path)
-    # Prevedenie všetkých stĺpcov typu 'object' na string pre kompatibilitu
-    for col in df.select_dtypes(include=["object"]).columns:
-        df[col] = df[col].astype(str)
-    return df
-
-
-@st.cache_data(show_spinner=True)
-def prepare_data(df: pd.DataFrame):
-    """
-    Predspracuje dáta pre následnú analýzu.
-    Kľúčové kroky:
-      - Výber len potrebných numerických metrik (alebo všetkých dostupných)
-      - Imputácia chýbajúcich hodnôt mediánom
-      - Pre kategóriové stĺpce (napr. 'name' a 'project') sa vykoná Label Encoding
-      - Pre stĺpec 'project' sa pripočíta frekvencia výskytu projektu
-      - Dynamické mapovanie stĺpca 'job' na kategórie podľa job_mapping
-      - Zakódovanie cieľovej premennej pomocou LabelEncoder
-
-    Vstup:
-      - df: pôvodný DataFrame s dátami
-
-    Výstup:
-      - df_features: DataFrame obsahujúci vybrané a predspracované príznaky
-      - y_encoded: Zakódovaný vektor cieľových premenných
-      - le: Inštancia LabelEncoder, ktorá sa použije na dekódovanie tried
-    """
-    # Zoznam metrik, ktoré chceme využiť (ak sú dostupné v dátach)
-    metrics_list = ["followers", "NoC", "AB", "NAB", "CII", "CNII", "CE", "NCE",
-                    "INEI", "IEI", "AddLGM", "DelLGM", "ChurnLGM", "NoMGM",
-                    "AddLOC", "DelLOC", "churnLOC", "AddF", "DelF",
-                    "AddSAM", "DelSAM", "ChurnSAM", "DiP", "ICT"]
-    available_metrics = [col for col in metrics_list if col in df.columns]
-    if available_metrics:
-        df_metrics = df[available_metrics].copy()
-    else:
-        # Ak špecifikované metriky nie sú dostupné, použijeme všetky numerické stĺpce
-        df_metrics = df.select_dtypes(include=[np.number]).copy()
-    # Imputácia chýbajúcich hodnôt mediánom
-    df_metrics = df_metrics.fillna(df_metrics.median())
-
-    # Spracovanie kategóriových premenných – kódovanie mien a projektov
-    df_cat = pd.DataFrame(index=df.index)
-    if "name" in df.columns:
-        le_name = LabelEncoder()
-        df_cat["name_encoded"] = le_name.fit_transform(df["name"].astype(str))
-    if "project" in df.columns:
-        le_project = LabelEncoder()
-        df_cat["project_encoded"] = le_project.fit_transform(df["project"].astype(str))
-        # Výpočet frekvencie výskytu jednotlivých projektov
-        project_freq = df["project"].value_counts()
-        df_cat["project_freq"] = df["project"].map(project_freq)
-
-    # Spojenie numerických a kategóriových dát do jedného DataFrame
-    df_features = pd.concat([df_metrics, df_cat], axis=1)
-
-    # Mapovanie cieľovej premennej 'job' na kategórie podľa preddefinovaného slovníka
-    if "job" in df.columns:
-        def dynamic_job_mapping(x):
-            return job_mapping.get(str(x).upper(), "neznamy")
-        df["job_class"] = df["job"].apply(dynamic_job_mapping)
-    else:
-        st.error("Chýba stĺpec 'job'.")
-        return None, None, None
-
-    # Zakódovanie cieľovej premennej do čísel pomocou LabelEncoder
-    le = LabelEncoder()
-    y_encoded = le.fit_transform(df["job_class"])
-    return df_features, y_encoded, le
-
-
-#############################################
-# STRÁNKY A FUNKCIE PRE ANALÝZU A VIZUALIZÁCIU
-#############################################
-def page_dataset_overview():
-    """
-    Funkcia pre zobrazenie prehľadu datasetu:
-      - Ukážka prvých niekoľkých riadkov dát
-      - Rozšírené štatistiky (popis, medián, počet chýbajúcich hodnôt)
-      - Zobrazenie korelačnej matice pre numerické stĺpce
-      - Informácie o jednotlivých stĺpcoch (typ, počet unikátnych hodnôt, chýbajúce hodnoty)
-      - Vizualizácia rozdelenia rolí vo forme bar grafu
-    """
-    st.header("Celkový prehľad datasetu")
-    df = load_data(DATA_FILE)
-
-    # Použitie tabov na oddelenie rôznych sekcií
-    tab1, tab2, tab3 = st.tabs(["Ukážka dát", "Rozšírené štatistiky", "Informácie o stĺpcoch"])
-    with tab1:
-        st.subheader("Ukážka dát")
-        num_rows = st.number_input("Počet riadkov na zobrazenie", min_value=5, max_value=50, value=10)
-        st.dataframe(df.head(num_rows))
-    with tab2:
-        st.subheader("Rozšírené štatistiky pre číselné stĺpce")
-        numeric_df = df.select_dtypes(include=[np.number])
-        desc = numeric_df.describe().T
-        # Pridanie mediánu a informácií o chýbajúcich hodnotách
-        desc["median"] = numeric_df.median()
-        desc["missing_count"] = df[numeric_df.columns].isna().sum()
-        desc["missing_percent"] = (desc["missing_count"] / len(df)) * 100
-        st.dataframe(desc)
-        # Možnosť zobraziť korelačnú maticu
-        if st.checkbox("Zobraziť korelačnú maticu"):
-            corr = numeric_df.corr()
-            fig_corr = px.imshow(corr, text_auto=True, color_continuous_scale="RdBu_r", title="Korelačná matica")
-            st.plotly_chart(fig_corr, use_container_width=True)
-            download_vector_figure(fig_corr, filename="korelacna_matica.svg")
-    with tab3:
-        st.subheader("Informácie o stĺpcoch")
-        col_info = pd.DataFrame({
-            "Typ": df.dtypes,
-            "Chýbajúce hodnoty": df.isna().sum(),
-            "Unikátne hodnoty": df.nunique()
-        })
-        st.table(col_info.astype(str))
-
-    # Vizualizácia rozdelenia rolí (ak je dostupný stĺpec 'job_class')
-    if "job_class" in df.columns:
-        st.subheader("Rozdelenie rolí")
-        job_counts = df["job_class"].value_counts().reset_index()
-        job_counts.columns = ["job_class", "count"]
-        fig_bar = px.bar(job_counts, x="job_class", y="count",
-                         title="Rozdelenie vývojárov podľa úrovne",
-                         color="job_class", text="count")
-        fig_bar.update_layout(transition_duration=500)
-        st.plotly_chart(fig_bar, use_container_width=True)
-        download_vector_figure(fig_bar, filename="rozdelenie_rolí.svg")
-
-
-def page_umap_visualization():
-    """
-    Funkcia demonštruje využitie UMAP na redukciu dimenzionality dát na 2D priestor.
-    Používateľ si môže nastaviť parametre UMAP (počet susedov a minimálnu vzdialenosť)
-    a výsledná vizualizácia zobrazuje body v 2D priestore, zafarbené podľa kategórie 'job_class'.
-    """
-    st.header("Vylepšená UMAP 2D Vizualizácia")
-    df = load_data(DATA_FILE)
-    df_features, y_encoded, le = prepare_data(df)
-    if df_features is None:
-        return
-
-    st.write("Táto sekcia demonštruje využitie UMAP na redukciu dimenzionality dát na 2D priestor.")
-
-    # Nastavenie parametrov UMAP
-    n_neighbors = st.slider("Počet susedov (n_neighbors)", min_value=2, max_value=50, value=15, step=1)
-    min_dist = st.slider("Minimálna vzdialenosť (min_dist)", min_value=0.0, max_value=1.0, value=0.1, step=0.05)
-
-    # Import knižnice UMAP
     try:
-        import umap
-    except ImportError:
-        st.error("Knižnica umap-learn nie je nainštalovaná. Nainštalujte ju príkazom 'pip install umap-learn'.")
-        return
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".svg") as tmp_svg:
+            tmp_svg.write(svg_bytes)
+            tmp_svg_path = tmp_svg.name
 
-    # Aplikácia UMAP na zníženie dimenzionality
-    reducer = umap.UMAP(n_neighbors=n_neighbors, min_dist=min_dist, n_components=2, random_state=42)
-    embedding = reducer.fit_transform(df_features)
+        tmp_pdf_path = os.path.join(os.path.dirname(tmp_svg_path), pdf_filename)
+        # Path to the Inkscape executable (update if necessary)
+        inkscape_path = r"C:\Program Files\Inkscape\bin\inkscape.exe"
+        if not os.path.exists(inkscape_path):
+            raise FileNotFoundError(f"Inkscape not found at: {inkscape_path}")
 
-    # Príprava dát pre vizualizáciu – použitie zakódovanej cieľovej premennej pre farebné odlíšenie
-    job_classes = le.inverse_transform(y_encoded)
-    df_umap = pd.DataFrame({
-        "UMAP1": embedding[:, 0],
-        "UMAP2": embedding[:, 1],
-        "JobClass": job_classes
-    })
+        subprocess.run([
+            inkscape_path,
+            tmp_svg_path,
+            "--export-filename", tmp_pdf_path,
+            "--export-area-drawing",
+            "--export-text-to-path"
+        ], check=True)
 
-    fig = px.scatter(df_umap, x="UMAP1", y="UMAP2", color="JobClass",
-                     title="UMAP 2D Vizualizácia", hover_data=["UMAP1", "UMAP2"])
-    fig.update_layout(transition_duration=500)
-    st.plotly_chart(fig, use_container_width=True)
-    download_vector_figure(fig, filename="umap_scatter.svg")
+        if not os.path.exists(tmp_pdf_path):
+            raise FileNotFoundError(f"PDF was not created: {tmp_pdf_path}")
+
+        with open(tmp_pdf_path, "rb") as f:
+            pdf_bytes = f.read()
+
+        os.remove(tmp_svg_path)
+        os.remove(tmp_pdf_path)
+        return pdf_bytes
+
+    except (FileNotFoundError, subprocess.CalledProcessError) as e:
+        st.error(f"Error converting SVG->PDF: {e}")
+        return None
 
 
-def page_classification():
+def download_pdf_vector_figure(fig, filename="figure.pdf"):
     """
-    Stránka pre klasifikáciu dát pomocou RandomForest.
-    Obsahuje:
-      - Vytvorenie pipeline so zahrnutým váhovaním príznakov, štandardizáciou a RandomForest klasifikátorom
-      - Hyperparametrické ladenie pomocou RandomizedSearchCV (s 3-fold CV)
-      - Vyhodnotenie modelu pomocou 5-Fold cross-validácie
-      - Výpočet základných aj rozšírených metrík (Accuracy, Precision, Recall, F1, Balanced Accuracy, Cohen's Kappa, Matthews Corrcoef, F2 Score, Brier Score, Avg Precision, ROC AUC, Log Loss)
-      - Vizualizácia ratingu vývojárov a matice zámien (confusion matrix)
+    Converts a Plotly figure to PDF and provides a download button.
     """
-    st.header("Klasifikácia + Hyperparametrické ladenie + CrossVal")
-    df = load_data(DATA_FILE)
-    df_features, y_encoded, le = prepare_data(df)
-    if df_features is None:
-        return
+    try:
+        svg_bytes = fig.to_image(format="svg")
+        pdf_bytes = convert_svg_to_pdf(svg_bytes, filename)
+        if pdf_bytes:
+            st.download_button(
+                label="Download as PDF",
+                data=pdf_bytes,
+                file_name=filename,
+                mime="application/pdf"
+            )
+    except (ValueError, OSError) as e:
+        st.error(f"Cannot export to PDF: {e}")
 
-    # Definícia pipeline, ktorá obsahuje:
-    # 1. Váhovanie príznakov (custom transformer)
-    # 2. Štandardizáciu dát (StandardScaler)
-    # 3. RandomForest klasifikátor s pevne nastaveným random_state pre reprodukovateľnosť
-    pipeline_steps = [
-        ("feature_weighting", feature_weighting_transformer),
-        ("scaler", StandardScaler()),
-        ("rf", RandomForestClassifier(random_state=42))
-    ]
-    pipe = Pipeline(steps=pipeline_steps)
+##############################################################################
+# DATA LOADING & PREPROCESSING
+##############################################################################
+@st.cache_data(show_spinner=True)
+def load_dataset(path=DATASET_PATH):
+    """
+    Loads the dataset from a Parquet file.
+    Ensures that categorical columns are converted to string type.
+    """
+    if not os.path.exists(path):
+        st.error(f"Dataset not found at '{path}'. Please check the path.")
+        return pd.DataFrame()
+    try:
+        df = pd.read_parquet(path)
+        # Ensure categorical columns are strings.
+        for col in CATEGORICAL_FEATURES:
+            if col in df.columns:
+                df[col] = df[col].astype("string")
+        # Let pandas infer better types for remaining columns.
+        df = df.convert_dtypes()
+        return df
+    except (OSError, ValueError) as e:
+        st.error(f"Error loading dataset: {e}")
+        return pd.DataFrame()
 
-    # Definícia rozsahu hyperparametrov pre RandomForest pre použitie v RandomizedSearchCV
-    param_dist = {
-        "rf__n_estimators": classification_config["RandomForest"]["n_estimators"],
-        "rf__max_depth": classification_config["RandomForest"]["max_depth"],
-        "rf__min_samples_split": classification_config["RandomForest"]["min_samples_split"],
-        "rf__max_features": classification_config["RandomForest"]["max_features"],
-        "rf__bootstrap": classification_config["RandomForest"]["bootstrap"],
-        "rf__class_weight": classification_config["RandomForest"]["class_weight"]
-    }
 
-    st.subheader("Hľadanie najlepších parametrov")
-    start_time = time.time()
-    # RandomizedSearchCV: testujeme 5 rôznych kombinácií hyperparametrov s 3-fold cross-validáciou
-    search = RandomizedSearchCV(pipe, param_dist, n_iter=5, cv=3, scoring="f1_macro", random_state=42)
-    search.fit(df_features, y_encoded)
-    training_time = time.time() - start_time
-    st.write("Čas ladenia: {:.2f} sekúnd".format(training_time))
-    st.write("Najlepšie parametre:", search.best_params_)
-
-    # Zobrazenie podrobných výsledkov testovaných modelov
-    cv_results_df = pd.DataFrame(search.cv_results_)[["params", "mean_test_score", "std_test_score", "rank_test_score"]]
-    st.subheader("Výsledky testovaných modelov")
-    st.dataframe(cv_results_df)
-
-    best_model = search.best_estimator_
-    # Použitie 5-Fold cross-validácie pre vyhodnotenie modelu pomocou F1 (macro) skóre
-    kf = KFold(n_splits=5, shuffle=True, random_state=42)
-    cv_scores = cross_val_score(best_model, df_features, y_encoded, cv=kf, scoring="f1_macro")
-    st.write("5-Fold CrossVal F1 (macro):", cv_scores)
-    st.write("Priemer F1:", np.mean(cv_scores), "±", np.std(cv_scores))
-
-    # Predikcia na celom datasete (pre demonštračné účely)
-    y_pred = best_model.predict(df_features)
-    acc = accuracy_score(y_encoded, y_pred)
-    prec = precision_score(y_encoded, y_pred, average="macro", zero_division=0)
-    rec = recall_score(y_encoded, y_pred, average="macro", zero_division=0)
-    f1_ = f1_score(y_encoded, y_pred, average="macro", zero_division=0)
-    bal_acc = balanced_accuracy_score(y_encoded, y_pred)
-    kappa = cohen_kappa_score(y_encoded, y_pred)
-    mcc = matthews_corrcoef(y_encoded, y_pred)
-
-    # Výpočet dodatočných metrík
-    f2 = fbeta_score(y_encoded, y_pred, beta=2, average="macro", zero_division=0)
-    if hasattr(best_model, "predict_proba"):
-        y_proba = best_model.predict_proba(df_features)
-        # Výpočet Brier skóre pre viactriednu klasifikáciu:
-        if len(np.unique(y_encoded)) == 2:
-            brier = brier_score_loss(y_encoded, y_proba.max(axis=1))
+def convert_time_to_float(time_val):
+    """
+    Converts a time value in 'HH:MM' format to a float representing hours.
+    For example, '09:30' becomes 9.5.
+    Returns np.nan if conversion fails.
+    """
+    try:
+        if isinstance(time_val, str) and ":" in time_val:
+            parts = time_val.split(":")
+            hours = float(parts[0])
+            minutes = float(parts[1])
+            return hours + minutes / 60.0
         else:
-            classes = np.arange(len(le.classes_))
-            y_true_bin = label_binarize(y_encoded, classes=classes)
-            brier = np.mean(np.sum((y_true_bin - y_proba) ** 2, axis=1))
-        avg_precision = average_precision_score(y_encoded, y_proba, average="macro")
+            # Try to convert directly to float.
+            return float(time_val)
+    except (ValueError, TypeError):
+        return np.nan
+
+def convert_percentage(val):
+    """
+    Converts a percentage value (e.g. '45.5%') to a float fraction (0.455).
+    If the input is already numeric, returns it as a float.
+    """
+    try:
+        if isinstance(val, str) and "%" in val:
+            val_clean = val.replace("%", "").strip()
+            return float(val_clean) / 100.0
+        else:
+            return float(val)
+    except (ValueError, TypeError):
+        return np.nan
+
+def impute_numeric_column(series):
+    """
+    Imputes missing values in a numeric Series.
+    If the entire column is missing, fills with 0.
+    Otherwise, fills missing values with the median.
+    """
+    if series.isna().all():
+        return series.fillna(0)
     else:
-        brier = None
-        avg_precision = None
+        median_value = series.median()
+        return series.fillna(median_value)
 
-    additional_metrics = {}
-    if hasattr(best_model, "predict_proba"):
-        try:
-            y_proba = best_model.predict_proba(df_features)
-            roc_auc = roc_auc_score(y_encoded, y_proba, multi_class="ovr", average="macro")
-            additional_metrics["ROC AUC (macro)"] = roc_auc
-            ll = log_loss(y_encoded, y_proba)
-            additional_metrics["Log Loss"] = ll
-        except Exception as e:
-            st.warning("Nepodarilo sa vypočítať ROC AUC/Log Loss: " + str(e))
-
-    # Zobrazenie základných metrík
-    st.markdown("**Základné metriky**:")
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Accuracy", f"{acc:.3f}")
-    col2.metric("Precision (macro)", f"{prec:.3f}")
-    col3.metric("Recall (macro)", f"{rec:.3f}")
-    col4.metric("F1 (macro)", f"{f1_:.3f}")
-
-    # Zobrazenie rozšírených metrík
-    st.markdown("**Rozšírené metriky**:")
-    col5, col6, col7, col8 = st.columns(4)
-    col5.metric("Balanced Accuracy", f"{bal_acc:.3f}")
-    col6.metric("Cohen's Kappa", f"{kappa:.3f}")
-    col7.metric("Matthews Corrcoef", f"{mcc:.3f}")
-    col8.metric("F2 Score", f"{f2:.3f}")
-    if brier is not None:
-        st.metric("Brier Score", f"{brier:.3f}")
-    if avg_precision is not None:
-        st.metric("Avg Precision Score", f"{avg_precision:.3f}")
-    if additional_metrics:
-        for metric_name, value in additional_metrics.items():
-            st.metric(metric_name, f"{value:.3f}")
-
-    # Výpočet ratingu – využíva pravdepodobnosť pre kategóriu "prof"
-    if hasattr(best_model, "predict_proba"):
-        y_proba = best_model.predict_proba(df_features)
-        prof_index = np.where(le.classes_ == "prof")[0]
-        if len(prof_index) > 0:
-            prof_index = prof_index[0]
-            ratings = y_proba[:, prof_index] * 100  # Konverzia pravdepodobnosti na skóre 0-100
-            rating_df = pd.DataFrame({"Developer": np.arange(len(ratings)), "Rating": ratings})
-            rating_df = rating_df.sort_values("Rating", ascending=False)
-            st.subheader("Rating vývojárov (0-100)")
-            fig_rating = px.bar(rating_df, x="Developer", y="Rating",
-                                title="Rating vývojárov podľa pravdepodobnosti pre 'prof'",
-                                text="Rating")
-            fig_rating.update_layout(transition_duration=500)
-            st.plotly_chart(fig_rating, use_container_width=True)
-            download_vector_figure(fig_rating, filename="rating_vyvojarov.svg")
-
-    # Zobrazenie matice zámien (confusion matrix)
-    cm = confusion_matrix(y_encoded, y_pred)
-    cm_df = pd.DataFrame(cm, index=le.classes_, columns=le.classes_)
-    fig_cm = px.imshow(cm_df, text_auto=True, color_continuous_scale="Blues",
-                       labels={"x": "Predikovaná trieda", "y": "Skutočná trieda"},
-                       x=le.classes_, y=le.classes_,
-                       title="Confusion Matrix")
-    fig_cm.update_layout(transition_duration=500)
-    st.plotly_chart(fig_cm, use_container_width=True)
-    download_vector_figure(fig_cm, filename="confusion_matrix.svg")
-    st.markdown("**Classification Report:**")
-    cr = classification_report(y_encoded, y_pred, target_names=le.classes_, zero_division=0)
-    st.text(cr)
-
-
-def page_lime_interpretation():
+def convert_target_value(val):
     """
-    Stránka pre interpretáciu predikcií pomocou LIME.
-    Používateľ si môže zvoliť konkrétny index vzorky zo testovacej množiny,
-    pre ktorú sa vygeneruje vysvetlenie modelovej predikcie.
-
-    Kroky:
-      - Rozdelenie dát na trénovaciu a testovaciu množinu
-      - Natrénovanie modelu (RandomForest) na trénovacích dátach
-      - Použitie LIME na vysvetlenie predikcie pre vybranú vzorku
-      - Zobrazenie textového vysvetlenia aj interaktívneho grafu s prehľadným usporiadaním
+    Converts the target column value (skuseny) to an integer.
+    Returns 1 if the value represents True (case-insensitive), 0 otherwise.
+    Handles boolean values as well as strings.
     """
-    st.header("Interpretácia predikcií s LIME")
-    df = load_data(DATA_FILE)
-    df_features, y_encoded, le = prepare_data(df)
-    if df_features is None:
-        return
-    X_train, X_test, y_train, y_test = train_test_split(
-        df_features, y_encoded, test_size=0.3, random_state=42, stratify=y_encoded
+    try:
+        if isinstance(val, bool):
+            return int(val)
+        elif isinstance(val, str):
+            if val.strip().lower() == "true":
+                return 1
+            else:
+                return 0
+        else:
+            return int(val)
+    except (ValueError, TypeError):
+        return 0
+
+
+def preprocess_data(df):
+    """
+    Preprocesses the input DataFrame in several clear steps:
+
+      1. Time Conversion: Converts columns like 'most_active_hour', 'beginning_regular',
+         'end_regular', and 'office' from 'HH:MM' strings to float hours.
+
+      2. Percentage Processing: Processes columns (e.g. 'weekend', 'night', 'morning', 'afternoon', 'evening')
+         by removing the '%' symbol and converting them to float fractions.
+
+      3. Numeric Conversion & Imputation: For all columns listed in NUMERIC_FEATURES,
+         converts values to numeric types and imputes missing values using the median. If an entire column is missing,
+         it is filled with 0.
+
+      4. Target Creation: The target variable 'y' is created from the 'skuseny' column,
+         using a dedicated conversion function.
+
+      5. Final Sanity: As a safeguard, any remaining NaN values in the features are filled with 0.
+
+    Returns:
+      X: A DataFrame of processed numeric features with no missing values.
+      y: The target series.
+    """
+    df_processed = df.copy()
+
+    # 1. Time Conversion
+    time_cols = ["most_active_hour", "beginning_regular", "end_regular", "office"]
+    for col in time_cols:
+        if col in df_processed.columns:
+            new_values = []
+            for x in df_processed[col]:
+                new_values.append(convert_time_to_float(x))
+            df_processed[col] = pd.Series(new_values, index=df_processed.index)
+
+    # 2. Percentage Processing
+    perc_cols = ["weekend", "night", "morning", "afternoon", "evening"]
+    for col in perc_cols:
+        if col in df_processed.columns:
+            new_values = []
+            for x in df_processed[col]:
+                new_values.append(convert_percentage(x))
+            df_processed[col] = pd.Series(new_values, index=df_processed.index)
+
+    # 3. Numeric Conversion & Imputation
+    valid_numeric_cols = [col for col in NUMERIC_FEATURES if col in df_processed.columns]
+    X = df_processed[valid_numeric_cols].copy()
+    for col in valid_numeric_cols:
+        # Convert to numeric type (coercing errors to NaN)
+        X[col] = pd.to_numeric(X[col], errors='coerce')
+        # Impute missing values using our helper
+        X[col] = impute_numeric_column(X[col])
+
+    # Final safeguard: fill any remaining NaNs with 0.
+    X.fillna(0, inplace=True)
+
+    # 4. Target Creation
+    if "skuseny" in df_processed.columns:
+        y = df_processed["skuseny"].apply(convert_target_value)
+    else:
+        st.error("Target column 'skuseny' not found in the dataset.")
+        y = pd.Series([0] * len(df_processed))
+
+    return X, y
+
+##############################################################################
+# FEATURE SELECTION METHODS
+##############################################################################
+def univariate_feature_selection(X, y, k=10):  # Try a smaller k, e.g., 10
+    """
+    Selects the top k features using the ANOVA F-test.
+    If there's only one class in y, a warning is issued.
+
+    Returns:
+      A tuple (X_new, features) where X_new is a DataFrame of the selected features
+      and features is the list of selected feature names.
+    """
+    if len(np.unique(y)) < 2:
+        st.warning("Target variable has only one unique class. Univariate feature selection may not be meaningful.")
+
+    selector = SelectKBest(score_func=f_classif, k=min(k, X.shape[1]))
+    X_new = selector.fit_transform(X, y)
+    mask = selector.get_support()
+    selected_feats = X.columns[mask].tolist()
+    return pd.DataFrame(X_new, columns=selected_feats), selected_feats
+
+
+def recursive_feature_elimination(X, y, estimator=None, n_features=10):  # Try a smaller n_features
+    """
+    Performs Recursive Feature Elimination (RFE) using a given estimator (default: LogisticRegression).
+
+    Returns:
+      A tuple (X_selected, features) where X_selected is the DataFrame with selected features
+      and features is the list of selected feature names.
+    """
+    if estimator is None:
+        estimator = LogisticRegression(solver='liblinear', max_iter=1000)
+
+    rfe = RFE(estimator=estimator, n_features_to_select=min(n_features, X.shape[1]))
+    rfe.fit(X, y)
+    mask = rfe.support_
+    selected_feats = X.columns[mask].tolist()
+    return X[selected_feats].copy(), selected_feats
+
+
+def combined_feature_selection(X, y):
+    """
+    Combines Univariate Feature Selection and Recursive Feature Elimination (RFE).
+    The resulting feature set includes any feature selected by either method.
+
+    Returns:
+      A tuple (X_combined, combined_features) where X_combined is the DataFrame containing only the
+      combined selected features and combined_features is a list of their names.
+    """
+
+    # 1. Univariate Feature Selection
+    st.markdown("<h4 style='color:#2c3e50;'>1) Univariate Feature Selection</h4>", unsafe_allow_html=True)
+    X_uni, feats_uni = univariate_feature_selection(X, y, k=10)  # Adjust k here as needed
+    with st.expander("Univariate Selection Details"):
+        st.success("Selected Features (Univariate):")
+        st.write(feats_uni)
+
+    # 2. Recursive Feature Elimination (RFE)
+    st.markdown("<h4 style='color:#2c3e50;'>2) Recursive Feature Elimination (RFE)</h4>", unsafe_allow_html=True)
+    X_rfe, feats_rfe = recursive_feature_elimination(X, y, n_features=10)  # Adjust n_features here as needed
+    with st.expander("RFE Details"):
+        st.info("Selected Features (RFE):")
+        st.write(feats_rfe)
+
+    # Combine features from both methods
+    combined_features = sorted(set(feats_uni + feats_rfe))
+
+    st.markdown("<h4 style='color:#2c3e50;margin-top:30px;'>Combined Feature Set</h4>", unsafe_allow_html=True)
+    st.markdown("<p style='font-size:15px;'>These features were selected by either Univariate or RFE methods.</p>",
+                unsafe_allow_html=True)
+    with st.expander("See Combined Feature List"):
+        st.markdown("<ul>", unsafe_allow_html=True)
+        for feat in combined_features:
+            st.markdown(f"<li style='font-size:14px;'>{feat}</li>", unsafe_allow_html=True)
+        st.markdown("</ul>", unsafe_allow_html=True)
+    st.markdown("<h5 style='color:#2c3e50;margin-top:20px;'>Final Selected Features</h5>", unsafe_allow_html=True)
+    st.markdown("<p style='font-size:14px;'>Below is a table listing the combined features.</p>",
+                unsafe_allow_html=True)
+    feature_df = pd.DataFrame({"Feature": combined_features})
+    feature_df.index += 1
+    st.table(feature_df)
+
+    return X[combined_features].copy(), combined_features
+
+##############################################################################
+# EXPERIMENTAL DEEP LEARNING MODEL (PyTorch)
+##############################################################################
+class ExperimentalNet(nn.Module):
+    """
+    A simple feed-forward neural network with dropout and batch normalization.
+    """
+
+    def __init__(self, input_dim):
+        super().__init__()
+        self.fc1 = nn.Linear(input_dim, 64)
+        self.bn1 = nn.BatchNorm1d(64)
+        self.fc2 = nn.Linear(64, 128)
+        self.bn2 = nn.BatchNorm1d(128)
+        self.fc3 = nn.Linear(128, 64)
+        self.bn3 = nn.BatchNorm1d(64)
+        self.fc4 = nn.Linear(64, 1)
+        self.dropout = nn.Dropout(0.3)
+        self.relu = nn.ReLU()
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.bn1(x)
+        x = self.dropout(x)
+        x = self.fc2(x)
+        x = self.relu(x)
+        x = self.bn2(x)
+        x = self.dropout(x)
+        x = self.fc3(x)
+        x = self.relu(x)
+        x = self.bn3(x)
+        x = self.dropout(x)
+        x = self.fc4(x)
+        x = self.sigmoid(x)
+        return x
+
+
+def experimental_deep_learning_model(X, y, epochs=30, batch_size=32, validation_split=0.2):
+    if len(X) < 2 or X.shape[1] == 0:
+        raise ValueError("Not enough data/features to train the deep learning model.")
+
+    device = torch.device("cpu")  # Use 'cuda' if available
+
+    X_array = X.values.astype(np.float32)
+    y_array = y.values.astype(np.float32).reshape(-1, 1)
+
+    X_trainval, X_test, y_trainval, y_test = train_test_split(
+        X_array, y_array, test_size=0.2, random_state=42, stratify=y_array
     )
+
+    tv_dataset = torch.utils.data.TensorDataset(
+        torch.tensor(X_trainval).to(device),
+        torch.tensor(y_trainval).to(device)
+    )
+    val_size = int(validation_split * len(tv_dataset))
+    train_size = len(tv_dataset) - val_size
+
+    train_dataset, val_dataset = torch.utils.data.random_split(
+        tv_dataset, [train_size, val_size],
+        generator=torch.Generator().manual_seed(42)
+    )
+
+    test_dataset = torch.utils.data.TensorDataset(
+        torch.tensor(X_test).to(device),
+        torch.tensor(y_test).to(device)
+    )
+
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+    model = ExperimentalNet(X.shape[1]).to(device)
+    criterion = nn.BCELoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+    history = {"train_loss": [], "val_loss": []}
+    start_time = time.time()
+    progress_bar = st.progress(0)
+
+    for epoch in range(epochs):
+        model.train()
+        train_loss = 0.0
+        for xb, yb in train_loader:
+            optimizer.zero_grad()
+            output = model(xb)
+            loss = criterion(output, yb)
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item() * xb.size(0)
+        epoch_train_loss = train_loss / len(train_loader.dataset)
+
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for xb, yb in val_loader:
+                output = model(xb)
+                loss = criterion(output, yb)
+                val_loss += loss.item() * xb.size(0)
+        epoch_val_loss = val_loss / len(val_loader.dataset)
+
+        history["train_loss"].append(epoch_train_loss)
+        history["val_loss"].append(epoch_val_loss)
+        progress_bar.progress(int((epoch + 1) / epochs * 100))
+    total_time = time.time() - start_time
+
+    model.eval()
+    all_preds, all_targets = [], []
+    with torch.no_grad():
+        for xb, yb in test_loader:
+            output = model(xb)
+            preds = (output >= 0.5).float()
+            all_preds.append(preds.cpu().numpy())
+            all_targets.append(yb.cpu().numpy())
+    all_preds = np.concatenate(all_preds).flatten()
+    all_targets = np.concatenate(all_targets).flatten()
+
+    all_probs = []
+    with torch.no_grad():
+        for xb, _ in test_loader:
+            prob_output = model(xb)
+            all_probs.append(prob_output.cpu().numpy())
+    all_probs = np.concatenate(all_probs).flatten()
+
+    metrics = {
+        "Accuracy": accuracy_score(all_targets, all_preds),
+        "Precision": precision_score(all_targets, all_preds, zero_division=0),
+        "Recall": recall_score(all_targets, all_preds, zero_division=0),
+        "F1 Score": f1_score(all_targets, all_preds, zero_division=0),
+        "ROC AUC": roc_auc_score(all_targets, all_probs),
+        "Training Time (s)": total_time
+    }
+    return model, metrics, history
+
+##############################################################################
+# TRAINING & EVALUATION FOR CLASSIFICATION MODELS
+##############################################################################
+def train_classification_model(X, y, model_type="RandomForest", test_size=0.25):
+    """
+    Trains a classification model using a pipeline and randomized search with multiple scoring metrics.
+    The data is split into training and hold‐out test sets. Hyperparameter tuning is performed on the
+    training set using RandomizedSearchCV with StratifiedKFold, and the tuned model is evaluated on the test set.
+
+    Parameters:
+      - X: Feature matrix.
+      - y: Target vector.
+      - model_type: "RandomForest" or "LightGBM".
+      - test_size: Fraction of data to reserve for testing.
+
+    Returns:
+      - best_model: The best estimator from hyperparameter tuning.
+      - best_params: Best hyperparameters.
+      - test_metrics: Performance metrics on the hold‐out test set.
+    """
+    # Split data into training and hold-out test sets
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=test_size, random_state=42, stratify=y
+    )
+
+    # Select classifier and hyperparameter grid
+    if model_type == "RandomForest":
+        clf = RandomForestClassifier(random_state=42)
+        param_dist = HYPERPARAM_CONFIG["RandomForest"]
+    else:
+        import lightgbm as lgb
+        clf = lgb.LGBMClassifier(random_state=42, verbose=-1)
+        param_dist = HYPERPARAM_CONFIG["LightGBM"]
+
+    # Build pipeline with scaling and classifier
     pipe = Pipeline([
         ("scaler", StandardScaler()),
-        ("rf", RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42))
+        ("classifier", clf)
     ])
-    pipe.fit(X_train, y_train)
-    X_test_df = X_test.copy()
-    st.write("Vyberte index vzorky pre vysvetlenie (0 - {}):".format(len(X_test_df) - 1))
-    selected_idx = st.slider("Index vzorky", 0, len(X_test_df) - 1, 0)
-    num_features = st.selectbox("Počet vlastností pre vysvetlenie", [3, 5, 6, 8, 10], index=2)
-    if len(X_test_df) > 0:
-        instance = X_test_df.iloc[selected_idx:selected_idx + 1]
-        explainer = LimeTabularExplainer(
-            training_data=X_train.values,
-            training_labels=y_train,
-            feature_names=X_train.columns.tolist(),
-            discretize_continuous=True
-        )
-        exp = explainer.explain_instance(
-            data_row=instance.iloc[0].values,
-            predict_fn=lambda x: pipe.predict_proba(pd.DataFrame(x, columns=X_train.columns)),
-            num_features=num_features
-        )
-        pred_class = pipe.predict(instance)[0]
-        pred_label = le.inverse_transform([pred_class])[0]
-        true_label = le.inverse_transform([y_test[selected_idx]])[0]
-        st.subheader(f"Vysvetlenie pre vzorku s indexom {selected_idx}")
-        st.markdown(f"**Skutočná trieda:** `{true_label}`  \n**Predikovaná trieda:** `{pred_label}`")
-        with st.expander("Zobraziť textové vysvetlenie LIME"):
-            explanation_list = exp.as_list()
-            explanation_md = "\n".join([f"- **{item[0]}**: {item[1]:.4f}" for item in explanation_list])
-            st.markdown(explanation_md)
-        st.markdown("**Interaktívny graf LIME:**")
-        # Vytvorenie prehľadného interaktívneho grafu s využitím Plotly
-        explanation_list = exp.as_list()
-        explanation_df = pd.DataFrame(explanation_list, columns=["Feature", "Contribution"])
-        # Zoradenie podľa príspevku pre lepšiu prehľadnosť (od najnižšieho po najvyšší)
-        explanation_df = explanation_df.sort_values(by="Contribution", ascending=True)
-        fig_lime = px.bar(
-            explanation_df,
-            x="Contribution",
-            y="Feature",
-            orientation='h',
-            title="LIME Explanation: Príspevky príznakov",
-            labels={"Contribution": "Príspevok k predikcii", "Feature": "Príznak"},
-            color="Contribution",
-            color_continuous_scale="RdBu"
-        )
-        st.plotly_chart(fig_lime, use_container_width=True)
-        download_vector_figure(fig_lime, filename="lime_explanation.svg")
-    else:
-        st.warning("Testovacia množina je prázdna.")
+
+    # Define scoring metrics
+    scoring = {
+        'Accuracy': 'accuracy',
+        'Precision': 'precision',
+        'Recall': 'recall',
+        'F1': 'f1',
+        'Balanced Accuracy': 'balanced_accuracy',
+        "Cohen's Kappa": make_scorer(cohen_kappa_score),
+        'Matthews Corrcoef': make_scorer(matthews_corrcoef),
+        'ROC AUC': 'roc_auc',
+        'Log Loss': 'neg_log_loss',
+        'F2 Score': make_scorer(fbeta_score, beta=2, zero_division=0),
+        'Brier Score': make_scorer(brier_score_loss, greater_is_better=False),
+        'Avg Precision': 'average_precision'
+    }
+
+    # Perform hyperparameter tuning on the training set
+    search = RandomizedSearchCV(
+        pipe,
+        param_distributions={f"classifier__{k}": v for k, v in param_dist.items()},
+        n_iter=20,
+        cv=3,
+        scoring=scoring,
+        refit='F1',
+        random_state=42,
+        n_jobs=-1,
+        return_train_score=True
+    )
+
+    search.fit(X_train, y_train)
+    best_model = search.best_estimator_
+    best_params = search.best_params_
+
+    # Optional: Additional cross-validation on training data (computed but not displayed here)
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    _ = cross_validate(best_model, X_train, y_train, cv=skf, scoring=scoring, return_train_score=True)
+
+    # Evaluate on the hold-out test set
+    test_metrics, _ = evaluate_model_performance(best_model, X_test, y_test)
+    return best_model, best_params, test_metrics
 
 
-@st.cache_resource(show_spinner=True)
-def train_flaml_automl(X, y, time_budget=60):
+def evaluate_model_performance(model, X, y):
     """
-    Funkcia na natrénovanie modelu pomocou FLAML AutoML.
-    Využíva cache, takže pri opakovanom spustení s rovnakými dátami sa model natrénuje len raz.
+    Evaluates the trained model on the provided dataset.
+    Computes performance metrics and returns them for display.
 
-    Vstup:
-      - X: Vstupné príznaky
-      - y: Cieľová premenná
-      - time_budget: Časový limit v sekundách pre ladenie modelu
+    Parameters:
+      - model: Trained classifier.
+      - X: Feature matrix.
+      - y: True labels.
 
-    Výstup:
-      - automl: Natrénovaný FLAML AutoML model
+    Returns:
+      - metrics_dict: A dictionary of computed performance metrics.
+      - y_pred: Predicted labels.
     """
+    y_pred = model.predict(X)
+    y_proba = model.predict_proba(X) if hasattr(model, "predict_proba") else None
+
+    metrics_dict = {
+        "Accuracy": accuracy_score(y, y_pred),
+        "Precision": precision_score(y, y_pred, zero_division=0),
+        "Recall": recall_score(y, y_pred, zero_division=0),
+        "F1 Score": f1_score(y, y_pred, zero_division=0),
+        "Balanced Accuracy": balanced_accuracy_score(y, y_pred),
+        "Cohen's Kappa": cohen_kappa_score(y, y_pred),
+        "Matthews Corrcoef": matthews_corrcoef(y, y_pred)
+    }
+    if y_proba is not None:
+        try:
+            metrics_dict["ROC AUC"] = roc_auc_score(y, y_proba[:, 1])
+            metrics_dict["Log Loss"] = log_loss(y, y_proba)
+            metrics_dict["F2 Score"] = fbeta_score(y, y_pred, beta=2, zero_division=0)
+            metrics_dict["Brier Score"] = brier_score_loss(y, y_proba[:, 1])
+            metrics_dict["Avg Precision"] = average_precision_score(y, y_proba[:, 1])
+        except (ValueError, IndexError) as e:
+            pass
+    return metrics_dict, y_pred
+
+##############################################################################
+# ADVANCED VISUALIZATION & INTERPRETATION TOOLS (UMAP, LIME, FLAML)
+##############################################################################
+def visualize_umap(X, y):
+    """
+    Reduces dimensions via UMAP and plots a 2D scatter.
+    Provides download options for the plot.
+    """
+    if umap is None:
+        st.error("UMAP is not installed. Please install 'umap-learn' first.")
+        return
+
+    st.subheader("UMAP Configuration")
+    n_neighbors = st.slider("Number of Neighbors", 5, 50, 15)
+    min_dist = st.slider("Min Distance", 0.0, 1.0, 0.1, step=0.05)
+
+    reducer = umap.UMAP(n_neighbors=n_neighbors, min_dist=min_dist, n_components=2, random_state=42)
+    emb = reducer.fit_transform(X)
+    df_emb = pd.DataFrame({"UMAP1": emb[:, 0], "UMAP2": emb[:, 1], "Target": y})
+
+    fig = px.scatter(
+        df_emb,
+        x="UMAP1",
+        y="UMAP2",
+        color=df_emb["Target"].astype(str),
+        title="UMAP 2D Projection"
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    download_vector_figure(fig, "umap_embedding.svg")
+    download_pdf_vector_figure(fig, "umap_embedding.pdf")
+
+
+def interpret_model_with_lime(model, X, y):
+    """
+    Provides a local explanation for a selected sample using LIME.
+    """
+    if LimeTabularExplainer is None:
+        st.error("LIME is not installed. Please install 'lime' first.")
+        return
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42, stratify=y)
+    sample_idx = st.slider("Sample Index for LIME Explanation", 0, len(X_test) - 1, 0)
+
+    explainer = LimeTabularExplainer(
+        training_data=X_train.values,
+        feature_names=X_train.columns.tolist(),
+        class_names=["Non-Professional", "Professional"],
+        discretize_continuous=True,
+        mode="classification"
+    )
+    row_instance = X_test.iloc[[sample_idx]]
+
+    def prediction_fn(xx):
+        return model.predict_proba(pd.DataFrame(xx, columns=X_train.columns))
+
+    exp = explainer.explain_instance(
+        data_row=row_instance.iloc[0].values,
+        predict_fn=prediction_fn,
+        num_features=min(10, X.shape[1])
+    )
+    st.write(f"**LIME Explanation for Sample Index {sample_idx}**")
+    st.write(f"Model Prediction: {model.predict(row_instance)[0]}, True Label: {y_test.iloc[sample_idx]}")
+
+    st.write("Local Explanation:")
+    for desc, weight in exp.as_list():
+        st.write(f"- {desc}: {weight:.3f}")
+
+    fig_lime = exp.as_pyplot_figure()
+    st.pyplot(fig_lime)
+
+
+@st.cache_resource
+def train_flaml_model(X, y, time_budget=60):
+    """
+    Trains an AutoML model using FLAML within the specified time budget.
+    Returns the trained AutoML model.
+    """
+    if not FLAML_AVAILABLE:
+        st.error("FLAML is not installed.")
+        return None
+
     automl = AutoML()
     settings = {
         "time_budget": time_budget,
-        "metric": "accuracy",
+        "metric": "f1",
         "task": "classification",
-        "log_file_name": "flaml_oss_devs.log",
+        "log_file_name": "flaml_developer.log",
         "seed": 42
     }
     automl.fit(X, y, **settings)
     return automl
 
-
-def page_automl():
+##############################################################################
+# DATA OVERVIEW FUNCTIONS
+##############################################################################
+def dataset_summary_info(df: pd.DataFrame):
     """
-    Stránka demonštrujúca použitie FLAML AutoML na ladenie modelu.
-    Dáta sa rozdelia na trénovaciu (80%) a testovaciu (20%) množinu.
-    Výsledný model sa otestuje na testovacej množine a zobrazí sa presnosť a F1 skóre.
-    Kešovanie znižuje dobu opakovaného trénovania.
-    Navyše, sú zobrazené detaily o vybranej modeli.
+    Generates a summary of the DataFrame including non-null counts, data types,
+    unique values, and total memory usage.
+    Returns:
+      - summary DataFrame
+      - memory usage in KB
     """
-    st.header("AutoML (FLAML) s kešovaním")
-    df = load_data(DATA_FILE)
-    df_features, y_encoded, le = prepare_data(df)
-    if df_features is None:
+    data = []
+    total_rows = len(df)
+    for col in df.columns:
+        non_null_count = df[col].notnull().sum()
+        null_count = total_rows - non_null_count
+        dtype = df[col].dtype
+        uniq_vals = df[col].nunique(dropna=True) if df[col].notna().any() else 0
+
+        example_val = None
+        non_null_sample = df[col].dropna()
+        if len(non_null_sample) > 0:
+            example_val = non_null_sample.iloc[0]
+
+        data.append([
+            col,
+            non_null_count,
+            null_count,
+            str(dtype),
+            uniq_vals,
+            str(example_val)[:50]
+        ])
+
+    info_df = pd.DataFrame(data, columns=[
+        "Column", "Non-Null Count", "Null Count", "Dtype", "Unique Values", "Example Value"
+    ])
+    mem_bytes = df.memory_usage(deep=True).sum()
+    mem_kb = mem_bytes / 1024
+    return info_df, mem_kb
+
+##############################################################################
+# STREAMLIT PAGE DEFINITIONS
+##############################################################################
+def page_data_and_model_training():
+    """
+    Page for:
+      - Dataset overview
+      - Feature selection
+      - Classification model training & evaluation
+    """
+    # Custom CSS for modern styling
+    st.markdown("""
+        <style>
+            .page-title {
+                text-align: center;
+                font-size: 2.8rem;
+                font-weight: bold;
+                color: #2c3e50;
+                margin-bottom: 0.5rem;
+            }
+            .section-header {
+                text-align: center;
+                font-size: 2rem;
+                font-weight: 600;
+                color: #34495e;
+                margin-bottom: 1rem;
+                border-bottom: 2px solid #3498db;
+                padding-bottom: 0.3rem;
+            }
+            .subheader {
+                font-size: 1.5rem;
+                color: #2c3e50;
+            }
+            .custom-metric {
+                font-size: 1.2rem;
+                color: #2980b9;
+                font-weight: 500;
+            }
+            hr {
+                border: none;
+                border-top: 2px solid #ecf0f1;
+                margin: 2rem 0;
+            }
+        </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown("<div class='page-title'>Data & Model Training</div>", unsafe_allow_html=True)
+
+    # Dataset Overview Section
+    with st.container():
+        st.markdown("<div class='section-header'>Dataset Overview</div>", unsafe_allow_html=True)
+        df = load_dataset()
+        if df.empty:
+            st.warning("No data loaded, cannot proceed.")
+            return
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("First 10 Rows")
+            st.dataframe(df.head(10), use_container_width=True)
+        with col2:
+            st.subheader("Dataset Summary")
+            summary_df, mem_kb = dataset_summary_info(df)
+            st.dataframe(summary_df, use_container_width=True)
+            st.markdown(f"<h4>Total Memory Usage: {mem_kb:.2f} KB</h4>", unsafe_allow_html=True)
+        st.markdown("<hr>", unsafe_allow_html=True)
+
+    # Feature Selection Section
+    with st.container():
+        st.markdown("<div class='section-header'>Feature Selection</div>", unsafe_allow_html=True)
+        X, y = preprocess_data(df)
+        if X.empty:
+            st.error("No numeric features found. Please check the dataset.")
+            return
+
+        X_sel, selected_feats = combined_feature_selection(X, y)
+        st.markdown("<hr>", unsafe_allow_html=True)
+
+    # Model Training & Evaluation Section
+    with st.container():
+        st.markdown("<div class='section-header'>Classification Model Training</div>", unsafe_allow_html=True)
+        st.markdown("<p style='text-align:center; font-size:1.1rem; color:#7f8c8d;'>Select the model type and start training the classifier.</p>", unsafe_allow_html=True)
+        chosen_model_type = st.selectbox("Choose Model Type", ["RandomForest", "LightGBM"])
+
+        if st.button("Train Classifier"):
+            with st.spinner("Training the classifier..."):
+                best_model, best_params, test_metrics = train_classification_model(X_sel, y, chosen_model_type)
+
+
+            # Display best hyperparameters
+            st.markdown("<h4>Best Hyperparameters</h4>", unsafe_allow_html=True)
+            st.table(pd.DataFrame([best_params]))
+
+            # Display test set evaluation metrics
+            st.markdown("<h4>Test Set Evaluation Metrics</h4>", unsafe_allow_html=True)
+            st.table(pd.DataFrame(test_metrics.items(), columns=["Metric", "Value"]))
+
+            st.success("Model training completed!")
+            # Save results to session state for later use
+            st.session_state["best_model"] = best_model
+            st.session_state["X_selected"] = X_sel
+            st.session_state["y"] = y
+
+
+
+def page_advanced_tools_and_interpretations():
+    """
+    Page for advanced visualization & model interpretation:
+      - UMAP for dimensionality reduction
+      - LIME for local interpretability
+      - FLAML for AutoML
+    """
+    st.title("Advanced Tools & Interpretations")
+
+    if "best_model" not in st.session_state:
+        st.warning("Please train a model first on the 'Data & Model Training' page.")
         return
-    if not FLAML_AVAILABLE or AutoML is None:
-        st.info("FLAML nie je dostupné. Skontrolujte inštaláciu balíka flaml[automl].")
+
+    st.header("UMAP Visualization")
+    df = load_dataset()
+    if df.empty:
+        st.warning("No data available for UMAP visualization.")
         return
-    st.write("Nastavte time_budget (sekundy) pre FLAML:")
-    tb = st.slider("time_budget", 10, 300, 60, 10)
-    st.write("Rozdeľujeme dáta 80% / 20%...")
-    X_train, X_test, y_train, y_test = train_test_split(
-        df_features, y_encoded, test_size=0.2, random_state=42, stratify=y_encoded
-    )
-    st.write("Spúšťame FLAML AutoML s kešovaním...")
-    automl_model = train_flaml_automl(X_train, y_train, tb)
-    y_pred = automl_model.predict(X_test)
-    acc = accuracy_score(y_test, y_pred)
-    st.success(f"[FLAML] Presnosť = {acc:.3f}")
-    f1_ = f1_score(y_test, y_pred, average="macro", zero_division=0)
-    st.metric("F1 (macro)", f"{f1_:.3f}")
+    X, y = preprocess_data(df)
 
-    # Zobrazenie detailov o vybranej modeli FLAML
-    st.subheader("Vybraná modelová konfigurácia FLAML")
-    st.write("Best Estimator:", automl_model.best_estimator)
-    st.write("Best Config:", automl_model.best_config)
-    st.markdown("**AutoML výsledky sú cachované, aby sa znížila doba trénovania.**")
+    if st.button("Generate UMAP Plot"):
+        visualize_umap(X, y)
+
+    st.header("LIME Interpretation")
+    if st.button("Run LIME Explanation"):
+        interpret_model_with_lime(st.session_state["best_model"], st.session_state["X_selected"], st.session_state["y"])
+
+    st.header("FLAML AutoML")
+    st.write("Run an automated model search within a set time budget.")
+    time_budget = st.slider("Time Budget (in seconds)", 10, 300, 60, step=10)
+    if st.button("Run FLAML AutoML"):
+        if len(X) < 2:
+            st.error("Not enough data to run FLAML.")
+            return
+
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42, stratify=y)
+        automl = train_flaml_model(X_train, y_train, time_budget)
+        if automl:
+            st.write("**Best Config:**", automl.best_config)
+            preds = automl.predict(X_test)
+            acc_ = accuracy_score(y_test, preds)
+            st.write(f"**Test Accuracy:** {acc_:.4f}")
 
 
-#############################################
-# HLAVNÁ FUNKCIA A KONFIGURÁCIA APLIKÁCIE
-#############################################
+def page_experimental_dl():
+    """
+    Page for experimenting with a simple feed-forward PyTorch neural network.
+    """
+    st.title("Experimental Deep Learning")
+
+    df = load_dataset()
+    if df.empty:
+        st.warning("Dataset not found. Cannot proceed with DL training.")
+        return
+
+    X, y = preprocess_data(df)
+    if X.empty:
+        st.error("No numeric features available. Cannot train the deep learning model.")
+        return
+
+    st.write("Tune hyperparameters for the deep learning model:")
+    epochs = st.slider("Epochs", 1, 100, 30)
+    batch_size = st.slider("Batch Size", 8, 256, 32, step=8)
+    validation_split = st.slider("Validation Split", 0.05, 0.5, 0.2, step=0.05)
+
+    if st.button("Start Deep Learning Training"):
+        with st.spinner("Training the deep learning model..."):
+            try:
+                model, metrics_dict, history = experimental_deep_learning_model(
+                    X, y, epochs=epochs, batch_size=batch_size, validation_split=validation_split
+                )
+            except ValueError as err:
+                st.error(f"Training Error: {err}")
+                return
+
+        st.subheader("Final Test Metrics")
+        st.table(pd.DataFrame(metrics_dict.items(), columns=["Metric", "Value"]))
+
+        st.subheader("Training Curves")
+        hist_df = pd.DataFrame({
+            "Train Loss": history["train_loss"],
+            "Validation Loss": history["val_loss"]
+        })
+        fig_curve = px.line(
+            hist_df,
+            y=["Train Loss", "Validation Loss"],
+            labels={"index": "Epoch"},
+            title="Loss vs. Epoch"
+        )
+        st.plotly_chart(fig_curve, use_container_width=True)
+        download_vector_figure(fig_curve, "training_loss.svg")
+        download_pdf_vector_figure(fig_curve, "training_loss.pdf")
+
+##############################################################################
+# MAIN FUNCTION
+##############################################################################
 def main():
     """
-    Hlavná funkcia aplikácie.
-    Nastavuje základné vlastnosti stránky, navigačný sidebar a spúšťa vybranú sekciu (stránku).
-
-    Sekcie obsahujú:
-      - Celkový prehľad datasetu
-      - Dimenzionálnu redukciu dát pomocou UMAP
-      - Klasifikáciu s hyperparametrickým ladením a 5-Fold CrossVal
-      - Interpretáciu pomocou LIME
-      - Automatické ladenie pomocou FLAML
+    Main function to control page navigation using the Streamlit sidebar.
     """
-    st.set_page_config(
-        page_title="Open-Source Devs: Klasifikácia & Dimenzionálna redukcia",
-        layout="wide"
-    )
-    st.markdown("""
-    <style>
-    body {
-        font-family: "Segoe UI", Tahoma, sans-serif;
-        background: #f4f7fb;
-        color: #2e2e2e;
-        transition: background 0.5s ease;
-    }
-    .sidebar-content, .stDataFrame, .stTable {
-        transition: all 0.5s ease;
-    }
-    .stButton>button:hover {
-        background-color: #00A1C9 !important;
-        transition: 0.3s;
-    }
-    h1, h2, h3 {
-        color: #0078AE;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-    with st.sidebar:
-        st.title("Navigácia")
-        st.markdown("""
-        **O aplikácii:**
-        - Načítanie a kešovanie datasetu
-        - Detailný prehľad dát (vrátane rozdelenia rolí a ratingu)
-        - Dimenzionálna redukcia dát pomocou UMAP (2D vizualizácia)
-        - RandomForest s hyperparametrickým ladením a 5-Fold CrossVal
-        - Interpretácia pomocou LIME s interaktívnym grafom
-        - AutoML s FLAML (kešovanie výsledkov)
-        ---
-        **Inštrukcie:**
-        Vyberte si stránku pomocou rádia.
-        """)
-        page = st.radio(
-            "Vyberte stránku:",
-            ("Celkový prehľad datasetu", "Dimenzionálna redukcia (UMAP)", "Klasifikácia", "Interpretácia (LIME)",
-             "AutoML (FLAML)")
-        )
-    if page == "Celkový prehľad datasetu":
-        page_dataset_overview()
-    elif page == "Dimenzionálna redukcia (UMAP)":
-        page_umap_visualization()
-    elif page == "Klasifikácia":
-        page_classification()
-    elif page == "Interpretácia (LIME)":
-        page_lime_interpretation()
-    else:
-        page_automl()
+    st.sidebar.title("Navigation")
+    options = [
+        "Data & Model Training",
+        "Advanced Tools & Interpretations",
+        "Experimental Deep Learning"
+    ]
+    choice = st.sidebar.radio("Go to section:", options)
 
-    st.sidebar.markdown("---")
-    st.sidebar.info(
-        "Aplikácia bola vytvorená pre demonštráciu pokročilých metód analýzy datasetov o open-source vývojároch."
-    )
-    st.markdown("<hr style='border:2px solid #0078AE'>", unsafe_allow_html=True)
-    st.info("Hotovo. Ďakujeme za pozornosť!")
+    if choice == "Data & Model Training":
+        page_data_and_model_training()
+    elif choice == "Advanced Tools & Interpretations":
+        page_advanced_tools_and_interpretations()
+    elif choice == "Experimental Deep Learning":
+        page_experimental_dl()
 
 
-# Spustenie aplikácie
 if __name__ == "__main__":
     main()
