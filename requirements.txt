@@ -2,9 +2,9 @@ streamlit
 numpy
 pandas
 plotly
+lightgbm
 torch
 scikit-learn
 umap-learn
 lime
 flaml[automl]
-lightgbm
