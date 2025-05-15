@@ -5,13 +5,15 @@ Enhanced Streamlit Design with Improved Graphs & Dual Download Options (SVG/PDF)
 All text is now in English. No LLM integrations.
 """
 
+import asyncio
 import os
+import random
 import subprocess
 import tempfile
 import time
 import warnings
-import asyncio
-
+import networkx as nx
+import plotly.graph_objects as go
 # Import third-party libraries
 import numpy as np
 import pandas as pd
@@ -36,7 +38,7 @@ from sklearn.model_selection import (
 )
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
-import random
+
 np.random.seed(42)
 torch.manual_seed(42)
 random.seed(42)
@@ -50,16 +52,15 @@ except ImportError:
     umap = None
 
 try:
-    from lime.lime_tabular import LimeTabularExplainer
-except ImportError:
-    LimeTabularExplainer = None
-
-try:
     from flaml import AutoML
     FLAML_AVAILABLE = True
 except ImportError:
     FLAML_AVAILABLE = False
     AutoML = None
+
+from ydata_profiling import ProfileReport
+import streamlit.components.v1 as components
+
 
 # Suppress warnings for a cleaner output
 warnings.filterwarnings("ignore")
@@ -133,7 +134,7 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 # GLOBAL SETTINGS & HYPERPARAMETERS
 ##############################################################################
 # Path to the dataset (Update if necessary)
-DATASET_PATH = r"developer_metrics_final.parquet"
+DATASET_PATH = r"C:\Users\nikit\PycharmProjects\Bk\DataCollecting\src\results\developer_metrics_final.parquet"
 
 # List of numeric and categorical features for processing
 NUMERIC_FEATURES = [
@@ -268,6 +269,37 @@ def load_dataset(path=DATASET_PATH):
         st.error(f"Error loading dataset: {e}")
         return pd.DataFrame()
 
+
+def generate_profiling_report(df: pd.DataFrame) -> None:
+    """
+    Vygeneruje a zobrazí HTML profilovací report pre daný DataFrame
+    s využitím knižnice ydata-profiling. Report sa vloží do rozklikávacieho
+    expanderu, aby bolo možné ho jednoducho skryť a pokračovať v práci
+    s ostatnými časťami aplikácie. Dodatočne je dostupné tlačidlo na
+    stiahnutie reportu v HTML formáte.
+    """
+    profile = ProfileReport(
+        df,
+        title="Automatizovaná analýza dát",
+        minimal=True
+    )
+
+    # Генеруємо HTML-звіт
+    profile_html = profile.to_html()
+
+    st.download_button(
+        label="Stiahnuť Profilovací Report (HTML)",
+        data=profile_html,
+        file_name="profiling_report.html",
+        mime="text/html"
+    )
+
+    with st.expander("Zobraziť/Skryť Profilovací Report", expanded=False):
+        components.html(
+            profile_html,
+            height=1200,  # За потреби змініть висоту
+            scrolling=True
+        )
 
 def convert_time_to_float(time_val):
     """
@@ -689,7 +721,7 @@ def train_classification_model(X, y, model_type="RandomForest", test_size=0.25):
     best_model = search.best_estimator_
     best_params = search.best_params_
 
-    # Optional: Additional cross-validation on training data (computed but not displayed here)
+    # Additional cross-validation on training data (computed but not displayed here)
     skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
     _ = cross_validate(best_model, X_train, y_train, cv=skf, scoring=scoring, return_train_score=True)
 
@@ -736,11 +768,11 @@ def evaluate_model_performance(model, X, y):
     return metrics_dict, y_pred
 
 ##############################################################################
-# ADVANCED VISUALIZATION & INTERPRETATION TOOLS (UMAP, LIME, FLAML)
+# ADVANCED VISUALIZATION & INTERPRETATION TOOLS (UMAP,FLAML)
 ##############################################################################
 def visualize_umap(X, y):
     """
-    Reduces dimensions via UMAP and plots a 2D scatter.
+    Reduces dimensions via UMAP and plots a 2D scatter with a boolean 'professional' label.
     Provides download options for the plot.
     """
     if umap is None:
@@ -751,60 +783,42 @@ def visualize_umap(X, y):
     n_neighbors = st.slider("Number of Neighbors", 5, 50, 15)
     min_dist = st.slider("Min Distance", 0.0, 1.0, 0.1, step=0.05)
 
-    reducer = umap.UMAP(n_neighbors=n_neighbors, min_dist=min_dist, n_components=2, random_state=42)
+    # Fit UMAP
+    reducer = umap.UMAP(
+        n_neighbors=n_neighbors,
+        min_dist=min_dist,
+        n_components=2,
+        random_state=42
+    )
     emb = reducer.fit_transform(X)
-    df_emb = pd.DataFrame({"UMAP1": emb[:, 0], "UMAP2": emb[:, 1], "Target": y})
 
+    # Build dataframe with boolean professional flag
+    df_emb = pd.DataFrame({
+        "Dimenzia 1": emb[:, 0],
+        "Dimenzia 2": emb[:, 1],
+        "professional": y.astype(bool)
+    })
+
+    # Plot
     fig = px.scatter(
         df_emb,
-        x="UMAP1",
-        y="UMAP2",
-        color=df_emb["Target"].astype(str),
-        title="UMAP 2D Projection"
+        x="Dimenzia 1",
+        y="Dimenzia 2",
+        color="professional",
+        title="UMAP 2D projekcia (Profesionál = True / False)",
+        labels={"professional": "Profesionál"}
     )
-    st.plotly_chart(fig, use_container_width=True)
 
+    # Localize axis and legend titles
+    fig.update_layout(
+        xaxis_title="Dimenzia 1",
+        yaxis_title="Dimenzia 2",
+        legend_title_text="Profesionál?"
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
     download_vector_figure(fig, "umap_embedding.svg")
     download_pdf_vector_figure(fig, "umap_embedding.pdf")
-
-
-def interpret_model_with_lime(model, X, y):
-    """
-    Provides a local explanation for a selected sample using LIME.
-    """
-    if LimeTabularExplainer is None:
-        st.error("LIME is not installed. Please install 'lime' first.")
-        return
-
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42, stratify=y)
-    sample_idx = st.slider("Sample Index for LIME Explanation", 0, len(X_test) - 1, 0)
-
-    explainer = LimeTabularExplainer(
-        training_data=X_train.values,
-        feature_names=X_train.columns.tolist(),
-        class_names=["Non-Professional", "Professional"],
-        discretize_continuous=True,
-        mode="classification"
-    )
-    row_instance = X_test.iloc[[sample_idx]]
-
-    def prediction_fn(xx):
-        return model.predict_proba(pd.DataFrame(xx, columns=X_train.columns))
-
-    exp = explainer.explain_instance(
-        data_row=row_instance.iloc[0].values,
-        predict_fn=prediction_fn,
-        num_features=min(10, X.shape[1])
-    )
-    st.write(f"**LIME Explanation for Sample Index {sample_idx}**")
-    st.write(f"Model Prediction: {model.predict(row_instance)[0]}, True Label: {y_test.iloc[sample_idx]}")
-
-    st.write("Local Explanation:")
-    for desc, weight in exp.as_list():
-        st.write(f"- {desc}: {weight:.3f}")
-
-    fig_lime = exp.as_pyplot_figure()
-    st.pyplot(fig_lime)
 
 
 @st.cache_resource
@@ -923,6 +937,9 @@ def page_data_and_model_training():
         if df.empty:
             st.warning("No data loaded, cannot proceed.")
             return
+        if st.button("Generate Data Profiling Report"):
+            with st.spinner("Generating profiling report..."):
+                generate_profiling_report(df)
 
         col1, col2 = st.columns(2)
         with col1:
@@ -977,7 +994,6 @@ def page_advanced_tools_and_interpretations():
     """
     Page for advanced visualization & model interpretation:
       - UMAP for dimensionality reduction
-      - LIME for local interpretability
       - FLAML for AutoML
     """
     st.title("Advanced Tools & Interpretations")
@@ -993,12 +1009,20 @@ def page_advanced_tools_and_interpretations():
         return
     X, y = preprocess_data(df)
 
-    if st.button("Generate UMAP Plot"):
-        visualize_umap(X, y)
+    if "show_umap" not in st.session_state:
+        st.session_state["show_umap"] = False
 
-    st.header("LIME Interpretation")
-    if st.button("Run LIME Explanation"):
-        interpret_model_with_lime(st.session_state["best_model"], st.session_state["X_selected"], st.session_state["y"])
+    # --- Funkcia na prepnutie stavu ---
+    def _toggle_umap():
+        st.session_state["show_umap"] = not st.session_state["show_umap"]
+
+    # --- Dynamický label tlačidla podľa stavu ---
+    btn_label = "Skryť UMAP graf" if st.session_state["show_umap"] else "Zobraziť UMAP graf"
+    st.button(btn_label, on_click=_toggle_umap)
+
+    # --- Kondicionálne vykreslenie alebo skrytie grafu ---
+    if st.session_state["show_umap"]:
+        visualize_umap(X, y)
 
     st.header("FLAML AutoML")
     st.write("Run an automated model search within a set time budget.")
@@ -1016,11 +1040,92 @@ def page_advanced_tools_and_interpretations():
             acc_ = accuracy_score(y_test, preds)
             st.write(f"**Test Accuracy:** {acc_:.4f}")
 
+def render_model_architecture(input_dim: int):
+    """
+    Vykreslí architektúru ExperimentalNet pomocou NetworkX + Plotly.
+    Umožňuje interaktívne zobrazenie a stiahnutie SVG/PDF.
+    """
+    # Definícia vrstiev a ich uzlov (len textové popisky sú po slovensky)
+    layers = [
+        [('Vstup', f'{input_dim} príznakov')],
+        [('FC1', '64 neurónov'), ('ReLU1', ''), ('BN1', '64'), ('Dropout1', 'p=0,3')],
+        [('FC2', '128 neurónov'), ('ReLU2', ''), ('BN2', '128'), ('Dropout2', 'p=0,3')],
+        [('FC3', '64 neurónov'), ('ReLU3', ''), ('BN3', '64'), ('Dropout3', 'p=0,3')],
+        [('Výstup', '1 neurón')]
+    ]
+
+    # Zostavíme NetworkX graf
+    G = nx.DiGraph()
+    pos = {}
+    x_gap = 300
+    y_gap = 100
+    for i, layer in enumerate(layers):
+        n = len(layer)
+        for j, (name, label) in enumerate(layer):
+            G.add_node(name, label=label)
+            pos[name] = (i * x_gap, (j - (n - 1) / 2) * y_gap)
+
+    # Spojenia (vstup ↗ skryté vrstvy ↗ výstup)
+    edges = [
+        ('Vstup','FC1'),
+        ('FC1','ReLU1'), ('ReLU1','BN1'), ('BN1','Dropout1'),
+        ('Dropout1','FC2'),
+        ('FC2','ReLU2'), ('ReLU2','BN2'), ('BN2','Dropout2'),
+        ('Dropout2','FC3'),
+        ('FC3','ReLU3'), ('ReLU3','BN3'), ('BN3','Dropout3'),
+        ('Dropout3','Výstup')
+    ]
+    G.add_edges_from(edges)
+
+    # Vytvorenie Plotly figúry
+    fig = go.Figure()
+
+    # Kreslíme hrany
+    for u, v in G.edges():
+        x0, y0 = pos[u]
+        x1, y1 = pos[v]
+        fig.add_trace(go.Scatter(
+            x=[x0, x1], y=[y0, y1],
+            mode='lines',
+            line=dict(width=2),
+            hoverinfo='none'
+        ))
+
+    # Kreslíme uzly s popiskami
+    for node, data in G.nodes(data=True):
+        x, y = pos[node]
+        text = node if not data['label'] else f"{node}\n{data['label']}"
+        fig.add_trace(go.Scatter(
+            x=[x], y=[y],
+            mode='markers+text',
+            marker=dict(size=60, line=dict(width=2)),
+            text=[text],
+            textposition='bottom center',
+            hoverinfo='text'
+        ))
+
+    fig.update_layout(
+        title="Architektúra experimentálnej siete",
+        xaxis=dict(visible=False),
+        yaxis=dict(visible=False),
+        margin=dict(l=20, r=20, t=40, b=20),
+        showlegend=False
+    )
+
+    # Zobrazenie a stiahnutie
+    st.plotly_chart(fig, use_container_width=True)
+    svg = fig.to_image(format="svg")
+    st.download_button("Stiahnuť architektúru (SVG)", svg, "architecture.svg", "image/svg+xml")
+    try:
+        pdf = fig.to_image(format="pdf")
+        st.download_button("Stiahnuť architektúru (PDF)", pdf, "architecture.pdf", "application/pdf")
+    except Exception:
+        st.warning("PDF export nie je k dispozícii.")
+
+
+
 
 def page_experimental_dl():
-    """
-    Page for experimenting with a simple feed-forward PyTorch neural network.
-    """
     st.title("Experimental Deep Learning")
 
     df = load_dataset()
@@ -1038,29 +1143,50 @@ def page_experimental_dl():
     batch_size = st.slider("Batch Size", 8, 256, 32, step=8)
     validation_split = st.slider("Validation Split", 0.05, 0.5, 0.2, step=0.05)
 
-    if st.button("Start Deep Learning Training"):
-        with st.spinner("Training the deep learning model..."):
-            try:
-                model, metrics_dict, history = experimental_deep_learning_model(
-                    X, y, epochs=epochs, batch_size=batch_size, validation_split=validation_split
-                )
-            except ValueError as err:
-                st.error(f"Training Error: {err}")
-                return
+    if "dl_trained" not in st.session_state:
+        st.session_state["dl_trained"] = False
 
+    def _run_training():
+        model, metrics_dict, history = experimental_deep_learning_model(
+            X, y, epochs=epochs, batch_size=batch_size, validation_split=validation_split
+        )
+        st.session_state["dl_metrics"] = metrics_dict
+        st.session_state["dl_history"] = history
+        st.session_state["dl_input_dim"] = X.shape[1]
+        st.session_state["dl_trained"] = True
+
+    btn_label = "Skryť výsledky" if st.session_state["dl_trained"] else "Spustiť tréning DL"
+    if st.button(btn_label, on_click=_run_training if not st.session_state["dl_trained"] else lambda: st.session_state.update({"dl_trained": False})):
+        pass
+
+    if st.session_state["dl_trained"]:
         st.subheader("Final Test Metrics")
-        st.table(pd.DataFrame(metrics_dict.items(), columns=["Metric", "Value"]))
+        st.table(pd.DataFrame(
+            st.session_state["dl_metrics"].items(),
+            columns=["Metric", "Value"]
+        ))
+
+        render_model_architecture(input_dim=st.session_state["dl_input_dim"])
 
         st.subheader("Training Curves")
+        hist = st.session_state["dl_history"]
         hist_df = pd.DataFrame({
-            "Train Loss": history["train_loss"],
-            "Validation Loss": history["val_loss"]
+            "Tréningová strata": hist["train_loss"],
+            "Validačná strata": hist["val_loss"]
         })
         fig_curve = px.line(
             hist_df,
-            y=["Train Loss", "Validation Loss"],
-            labels={"index": "Epoch"},
-            title="Loss vs. Epoch"
+            labels={
+                "index": "Epocha",
+                "value": "Hodnota straty",
+                "variable": "Typ straty"
+            },
+            title="Priebeh tréningovej a validačnej straty počas epoch"
+        )
+        fig_curve.update_layout(
+            xaxis_title="Epocha",
+            yaxis_title="Strata",
+            legend_title_text="Legenda"
         )
         st.plotly_chart(fig_curve, use_container_width=True)
         download_vector_figure(fig_curve, "training_loss.svg")
